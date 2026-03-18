@@ -1,0 +1,23 @@
+﻿services:
+  xiaohongshuritter:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: xiaohongshuritter:local
+    container_name: xiaohongshuritter
+    restart: unless-stopped
+    init: true
+    tty: true
+    shm_size: "1gb"
+    ports:
+      - "${XHS_PORT:-18060}:18060"
+    volumes:
+      - ./data:/app/data
+      - ./images:/app/images
+      - ./config/accounts.json:/app/config/accounts.json:ro
+    environment:
+      - XHS_ACCOUNT_CONFIG=/app/config/accounts.json
+      - XHS_MAX_CONCURRENCY=${XHS_MAX_CONCURRENCY:-12}
+      - XHS_ACCOUNT_MAX_CONCURRENCY=${XHS_ACCOUNT_MAX_CONCURRENCY:-3}
+      - XHS_ACQUIRE_TIMEOUT=${XHS_ACQUIRE_TIMEOUT:-180s}
+      - XHS_PROXY=${XHS_PROXY:-}

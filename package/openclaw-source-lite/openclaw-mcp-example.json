@@ -1,0 +1,5 @@
+﻿{
+  "name": "xiaohongshuritter-arm64",
+  "transport": "streamable_http",
+  "url": "http://YOUR_SERVER_IP:18060/mcp"
+}

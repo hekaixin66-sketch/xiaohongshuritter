@@ -1,83 +1,66 @@
-# xiaohongshuritter
+﻿# xiaohongshuritter
 
-`xiaohongshuritter` 是一个面向企业场景的小红书 MCP 系统，支持多租户、多账号、并发控制，并提供 `Docker 部署`、`源码部署`、`OpenClaw 部署` 三种交付方式。
+`xiaohongshuritter` 是一个面向企业场景的小红书 MCP 系统，支持多租户、多账号、并发控制，以及 `Docker 部署`、`源码部署`、`OpenClaw 部署` 三种交付方式。
 
-项目适合以下场景：
-
-- 企业内多个品牌、多个业务线共用一套小红书自动化能力
-- 同一服务同时托管多个账号，并为每个账号单独隔离 Cookie、代理和浏览器参数
-- 需要通过 MCP 被 OpenClaw、Claude、Cherry Studio、AnythingLLM 等客户端调用
-- 需要在 `Windows`、`macOS`、`Linux`、`OpenClaw` 等环境中稳定部署
-
-## 项目定位
-
-与“单账号、单进程、手工操作型工具”不同，`xiaohongshuritter` 更强调企业级运行能力：
-
-- 多租户：通过 `tenant_id` 隔离企业或业务线
-- 多账号：通过 `account_id` 管理同租户下的多个账号
-- 多并发：提供全局并发和单账号并发控制，避免单账号被高并发打爆
-- 多平台：支持 Docker、Windows 源码部署、macOS M4、OpenClaw
-- 多入口：同时提供 MCP 与 HTTP API
+适用场景：
+- 企业内部多个品牌、业务线共用一套小红书自动化服务
+- 多个运营账号统一接入 MCP，由 AI 客户端按 `tenant_id` 和 `account_id` 路由调用
+- 需要在 `Windows`、`macOS`、`Linux`、`Docker`、`OpenClaw` 等环境稳定部署
+- 需要图文发布、视频发布、搜索、评论、资料查询等自动化能力
 
 ## 核心能力
 
-- 登录状态检测与二维码登录
+- 多租户隔离：通过 `tenant_id` 区分企业、品牌或业务线
+- 多账号路由：通过 `account_id` 管理同租户下多个账号
+- 并发控制：支持全局并发和单账号并发上限
+- MCP + HTTP API：同时提供 MCP 服务入口和 HTTP 管理接口
+- 账号状态管理：支持登录检测、二维码登录、Cookie 隔离
+- 多平台部署：支持标准 Docker、源码运行、OpenClaw 调用
+
+## 功能概览
+
+- 登录状态检查
+- 登录二维码获取
 - 图文笔记发布
 - 视频笔记发布
-- 首页推荐流获取
+- 推荐流获取
 - 关键词搜索
 - 笔记详情获取
-- 评论发布与回复
-- 账号列表与运行时并发状态查看
-- 企业级账号路由：`tenant_id` / `account_id`
-
-## 架构特点
-
-- 每个账号拥有独立 `cookie_path`
-- 每个账号可独立配置 `max_concurrency`
-- 支持默认租户和默认账号回退
-- HTTP 与 MCP 共用统一账号解析逻辑
-- 支持通过 Header、Body、Query 三种方式路由账号
-- ARM64 Docker 镜像可内置 Chromium，适合 OpenClaw 场景
+- 评论与回复
+- 当前账号列表和并发状态查询
 
 ## 部署方式
 
-建议按你的使用方式选择：
-
 | 场景 | 推荐方式 | 文档 |
 | --- | --- | --- |
-| 本地或服务器快速上线 | Docker 部署 | [docs/docker_deployment.md](./docs/docker_deployment.md) |
-| 需要直接调试源码、二次开发 | 源码部署 | [docs/source_deployment.md](./docs/source_deployment.md) |
-| 给 OpenClaw 稳定调用 | OpenClaw 部署 | [docs/openclaw_deployment.md](./docs/openclaw_deployment.md) |
-| Apple Silicon / M4 | macOS M4 + OpenClaw | [docs/macos_m4_openclaw.md](./docs/macos_m4_openclaw.md) |
-| Windows 本地部署 | Windows 企业版部署 | [docs/windows_enterprise.md](./docs/windows_enterprise.md) |
+| 标准服务器部署 | Docker | [docs/docker_deployment.md](./docs/docker_deployment.md) |
+| 本地开发与二次开发 | 源码部署 | [docs/source_deployment.md](./docs/source_deployment.md) |
+| OpenClaw 集成 | OpenClaw 部署 | [docs/openclaw_deployment.md](./docs/openclaw_deployment.md) |
+| Apple Silicon | macOS M4 指南 | [docs/macos_m4_openclaw.md](./docs/macos_m4_openclaw.md) |
+| Windows 企业环境 | Windows 指南 | [docs/windows_enterprise.md](./docs/windows_enterprise.md) |
 
 ## 快速开始
 
 ### 1. 准备账号配置
 
-企业版账号配置示例：
-
 ```bash
 cp configs/accounts.enterprise.example.json configs/accounts.json
 ```
 
-最小配置示例：
+最小示例：
 
 ```json
 {
   "default_tenant": "default",
-  "default_account": "default",
+  "default_account": "main",
   "global_max_concurrency": 12,
   "tenants": [
     {
       "id": "default",
-      "name": "Default Tenant",
       "default_account": "main",
       "accounts": [
         {
           "id": "main",
-          "name": "Main Account",
           "cookie_path": "./data/default/main/cookies.json",
           "max_concurrency": 3
         }
@@ -87,7 +70,7 @@ cp configs/accounts.enterprise.example.json configs/accounts.json
 }
 ```
 
-### 2. 选择部署方式
+### 2. 启动服务
 
 Docker：
 
@@ -101,7 +84,7 @@ docker compose -f docker/docker-compose.yml up -d
 go run .
 ```
 
-### 3. 检查服务
+### 3. 验证服务
 
 ```bash
 curl http://127.0.0.1:18060/health
@@ -110,77 +93,58 @@ curl http://127.0.0.1:18060/api/v1/accounts
 
 ### 4. MCP 地址
 
-默认 MCP 地址：
-
 ```text
 http://127.0.0.1:18060/mcp
 ```
 
-## OpenClaw 调用方式
-
-在 OpenClaw 中新增 MCP Server：
-
-- Transport: `streamable_http`
-- URL: `http://<服务器IP>:18060/mcp`
-
-企业级调用时，强烈建议每次都显式传入：
-
-- `tenant_id`
-- `account_id`
-
-示例：
+## OpenClaw 调用示例
 
 ```json
 {
   "tenant_id": "default",
   "account_id": "main",
   "title": "企业内容发布示例",
-  "content": "支持多租户、多账号与并发发布",
+  "content": "支持多租户、多账号与并发发布。",
   "images": ["/app/images/demo.jpg"],
   "tags": ["内容运营", "企业发布"],
   "visibility": "公开可见"
 }
 ```
 
-更多 OpenClaw 说明见 [docs/openclaw_deployment.md](./docs/openclaw_deployment.md)。
+## 交付包
 
-## HTTP API 账号路由
+仓库中包含适合 OpenClaw 和运维交付的包模板：
 
-账号路由优先级如下：
+- [package/README.md](./package/README.md)
+- [package/openclaw-lite/README.md](./package/openclaw-lite/README.md)
+- [package/openclaw-source-lite/README.md](./package/openclaw-source-lite/README.md)
 
-1. Body 中的 `tenant_id`、`account_id`
-2. Header 中的 `X-XHS-Tenant`、`X-XHS-Account`
-3. Query 中的 `tenant_id`、`account_id`
+说明：
+- `openclaw-lite` 适合标准 Docker / Linux amd64 环境
+- `openclaw-source-lite` 适合 ARM64、Chromium 预置、OpenClaw 稳定交付
 
-如果都不传，则回退到 `configs/accounts.json` 中定义的默认账号。
-
-## 主要文档
+## 文档导航
 
 - 企业级能力说明：[docs/enterprise_deployment.md](./docs/enterprise_deployment.md)
+- HTTP API 文档：[docs/API.md](./docs/API.md)
+- 企业 API 扩展：[docs/API_ENTERPRISE.md](./docs/API_ENTERPRISE.md)
 - Docker 部署：[docs/docker_deployment.md](./docs/docker_deployment.md)
 - 源码部署：[docs/source_deployment.md](./docs/source_deployment.md)
 - OpenClaw 部署：[docs/openclaw_deployment.md](./docs/openclaw_deployment.md)
-- macOS M4 部署：[docs/macos_m4_openclaw.md](./docs/macos_m4_openclaw.md)
-- Windows 部署：[docs/windows_enterprise.md](./docs/windows_enterprise.md)
-- 企业 API 扩展：[docs/API_ENTERPRISE.md](./docs/API_ENTERPRISE.md)
-- 原始 API 文档：[docs/API.md](./docs/API.md)
 
-## 平台支持
+## 参考项目说明
 
-- `Windows`
-- `macOS Intel / Apple Silicon`
-- `Linux`
-- `Docker / Docker Compose`
-- `OpenClaw`
+本项目在设计与实现上参考了开源项目 [xpzouying/xiaohongshu-mcp](https://github.com/xpzouying/xiaohongshu-mcp)，并在此基础上扩展了企业级多账号、多并发、OpenClaw 交付、Docker 与多平台部署等能力。
 
-## 生产使用建议
+进一步说明见 [NOTICE.md](./NOTICE.md)。
 
-- 单账号不要同时在多个网页端登录，否则 Cookie 很容易失效
-- 初始并发建议从 `global_max_concurrency=8~12`、`account max_concurrency=2~3` 开始压测
-- 企业内不同账号必须使用独立 Cookie 文件
-- OpenClaw 侧不要依赖“默认账号”，必须显式传账号参数
-- 若容器环境无法下载浏览器，优先使用内置 Chromium 的 ARM64 Dockerfile
+## 开源协作
 
-## 合规与风险提示
+- 变更记录：[CHANGELOG.md](./CHANGELOG.md)
+- 安全说明：[SECURITY.md](./SECURITY.md)
+- 社区行为准则：[CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md)
+- 贡献说明：[CONTRIBUTING.md](./CONTRIBUTING.md)
 
-本项目用于自动化接入和企业内部效率提升，请在遵守平台规则、账号授权和当地法律法规的前提下使用。涉及发布、评论、点赞等写操作时，应做好限流、审核与审计。
+## 合规提醒
+
+请在账号授权、平台规则和当地法律法规允许的前提下使用本项目。涉及发布、评论、点赞等写操作时，建议接入审核、限流和审计流程。

@@ -1,0 +1,22 @@
+{
+  "default_tenant": "default",
+  "default_account": "default",
+  "global_max_concurrency": 8,
+  "acquire_timeout_seconds": 180,
+  "tenants": [
+    {
+      "id": "default",
+      "name": "Default Tenant",
+      "default_account": "default",
+      "accounts": [
+        {
+          "id": "default",
+          "name": "Default Account",
+          "cookie_path": "/app/data/default/default/cookies.json",
+          "max_concurrency": 2,
+          "headless": true
+        }
+      ]
+    }
+  ]
+}

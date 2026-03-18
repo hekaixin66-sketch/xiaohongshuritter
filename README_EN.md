@@ -1,11 +1,10 @@
-# xiaohongshuritter
+﻿# xiaohongshuritter
 
-`xiaohongshuritter` is an enterprise-grade Xiaohongshu MCP system with multi-tenant, multi-account, and concurrency control support. It provides three main delivery modes: `Docker deployment`, `source deployment`, and `OpenClaw deployment`.
+`xiaohongshuritter` is an enterprise-grade Xiaohongshu MCP system with multi-tenant, multi-account, and concurrency control support. It provides `Docker deployment`, `source deployment`, and `OpenClaw deployment` delivery modes.
 
-This project is designed for:
-
+This project is intended for:
 - enterprises managing multiple brands or business units with one MCP service
-- teams running multiple Xiaohongshu accounts with isolated cookies and runtime settings
+- teams operating multiple Xiaohongshu accounts with isolated cookies and runtime settings
 - OpenClaw or MCP-based clients that need stable production deployment
 - Windows, macOS, Linux, Docker, and Apple Silicon environments
 
@@ -17,19 +16,19 @@ This project is designed for:
 - MCP and HTTP API entrypoints
 - Docker and source deployment options
 - OpenClaw-ready delivery workflow
-- ARM64 container support with bundled Chromium strategy
+- ARM64 container support with bundled Chromium
 
 ## Main Features
 
-- login status check
-- login QR code generation
-- image post publishing
-- video post publishing
-- search feeds
-- list recommended feeds
-- get feed detail
-- post comments and replies
-- list configured accounts and current in-flight usage
+- Login status check
+- Login QR code generation
+- Image post publishing
+- Video post publishing
+- Search feeds
+- List recommended feeds
+- Get feed detail
+- Post comments and replies
+- List configured accounts and current in-flight usage
 
 ## Documentation
 
@@ -95,17 +94,30 @@ Example:
 {
   "tenant_id": "default",
   "account_id": "main",
-  "keyword": "home appliance repair"
+  "keyword": "brand content"
 }
 ```
 
-## Production Notes
+## Package Templates
 
-- Do not keep the same account logged in on multiple web sessions at the same time.
-- Start with conservative concurrency values and increase only after stress testing.
-- Keep cookie files isolated per account.
-- Prefer explicit tenant/account routing in OpenClaw and other MCP clients.
-- For ARM64 container environments, use the Chromium-bundled Docker strategy documented in this repo.
+This repository includes ready-to-adapt delivery templates:
+
+- [package/README.md](./package/README.md)
+- [package/openclaw-lite/README.md](./package/openclaw-lite/README.md)
+- [package/openclaw-source-lite/README.md](./package/openclaw-source-lite/README.md)
+
+## Upstream Reference
+
+This repository references the open-source project [xpzouying/xiaohongshu-mcp](https://github.com/xpzouying/xiaohongshu-mcp) for design and implementation ideas, and extends it with enterprise multi-account routing, concurrency controls, OpenClaw delivery, Docker workflows, and multi-platform deployment support.
+
+See [NOTICE.md](./NOTICE.md) for attribution details.
+
+## Open Source Collaboration
+
+- Change log: [CHANGELOG.md](./CHANGELOG.md)
+- Security policy: [SECURITY.md](./SECURITY.md)
+- Code of conduct: [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md)
+- Contributing guide: [CONTRIBUTING.md](./CONTRIBUTING.md)
 
 ## Compliance
 
