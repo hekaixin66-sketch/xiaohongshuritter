@@ -1,0 +1,43 @@
+{
+  "default_tenant": "brand-a",
+  "default_account": "marketing-main",
+  "global_max_concurrency": 12,
+  "acquire_timeout_seconds": 180,
+  "tenants": [
+    {
+      "id": "brand-a",
+      "name": "Brand A",
+      "default_account": "marketing-main",
+      "accounts": [
+        {
+          "id": "marketing-main",
+          "name": "Brand A Main",
+          "cookie_path": "./data/brand-a/marketing-main/cookies.json",
+          "max_concurrency": 3,
+          "headless": true
+        },
+        {
+          "id": "marketing-backup",
+          "name": "Brand A Backup",
+          "cookie_path": "./data/brand-a/marketing-backup/cookies.json",
+          "max_concurrency": 2,
+          "headless": true
+        }
+      ]
+    },
+    {
+      "id": "brand-b",
+      "name": "Brand B",
+      "default_account": "ops-main",
+      "accounts": [
+        {
+          "id": "ops-main",
+          "name": "Brand B Main",
+          "cookie_path": "./data/brand-b/ops-main/cookies.json",
+          "max_concurrency": 4,
+          "headless": true
+        }
+      ]
+    }
+  ]
+}

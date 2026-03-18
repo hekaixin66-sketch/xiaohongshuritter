@@ -1,0 +1,9 @@
+{
+    "servers": {
+        "xiaohongshuritter": {
+            "url": "http://localhost:18060/mcp",
+            "type": "http"
+        }
+    },
+    "inputs": []
+}

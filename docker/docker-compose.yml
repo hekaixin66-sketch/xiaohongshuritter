@@ -1,0 +1,23 @@
+services:
+  xiaohongshuritter:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: xiaohongshuritter:local
+    container_name: xiaohongshuritter
+    restart: unless-stopped
+    init: true
+    tty: true
+    volumes:
+      - ./data:/app/data
+      - ./images:/app/images
+      - ./config/accounts.json:/app/config/accounts.json:ro
+    environment:
+      # Optional. Leave empty on ARM64 so rod can auto-detect/download Chromium.
+      # - ROD_BROWSER_BIN=/usr/bin/google-chrome
+      - XHS_ACCOUNT_CONFIG=/app/config/accounts.json
+      - XHS_MAX_CONCURRENCY=12
+      - XHS_ACCOUNT_MAX_CONCURRENCY=3
+      - XHS_ACQUIRE_TIMEOUT=180s
+    ports:
+      - "18060:18060"

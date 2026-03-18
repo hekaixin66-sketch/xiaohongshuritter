@@ -1,0 +1,44 @@
+# Dockerfile for ARM64 architecture
+# Chromium is installed in the image at build time, so runtime does not need
+# to download browser binaries from external CDNs.
+
+# ---- build stage ----
+FROM golang:1.24 AS builder
+
+WORKDIR /src
+ENV GOPROXY=https://goproxy.cn,direct
+ENV GOSUMDB=sum.golang.google.cn
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/app .
+
+# ---- run stage ----
+FROM debian:bookworm-slim
+
+WORKDIR /app
+
+# Install Chromium and minimal runtime dependencies.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    chromium \
+    fonts-liberation \
+    tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /out/app .
+
+RUN mkdir -p /app/images && \
+    chmod 777 /app/images && \
+    ln -sf /usr/bin/chromium /usr/bin/chromium-browser && \
+    ln -sf /usr/bin/chromium /usr/bin/google-chrome
+
+RUN printf '#!/bin/sh\nset -e\nif [ -n "${ROD_BROWSER_BIN:-}" ] && [ -x "$ROD_BROWSER_BIN" ]; then\n  :\nelif [ -x /usr/bin/chromium ]; then\n  export ROD_BROWSER_BIN=/usr/bin/chromium\nelif [ -x /usr/bin/chromium-browser ]; then\n  export ROD_BROWSER_BIN=/usr/bin/chromium-browser\nelif [ -x /usr/bin/google-chrome ]; then\n  export ROD_BROWSER_BIN=/usr/bin/google-chrome\nelse\n  echo "No browser binary found in container." >&2\n  exit 1\nfi\necho \"Using browser: $ROD_BROWSER_BIN\"\nexec ./app\n' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
+
+ENV ROD_BROWSER_BIN=/usr/bin/chromium
+
+EXPOSE 18060
+
+ENTRYPOINT ["/app/entrypoint.sh"]
