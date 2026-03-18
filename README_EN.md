@@ -8,6 +8,55 @@ This project is intended for:
 - OpenClaw or MCP-based clients that need stable production deployment
 - Windows, macOS, Linux, Docker, and Apple Silicon environments
 
+## Architecture Diagram
+
+```mermaid
+flowchart LR
+    subgraph "Entry Points"
+        A["OpenClaw"]
+        B["Internal AI Apps"]
+        C["Ops Scripts / Admin Tools"]
+    end
+
+    A --> D["MCP Endpoint (/mcp)"]
+    B --> D
+    C --> E["HTTP API (/api/v1/*)"]
+
+    D --> F["Tenant and Account Router"]
+    E --> F
+    F --> G["Concurrency Governor"]
+    G --> H["Login and Session Manager"]
+    H --> I["Browser Automation Layer"]
+    I --> J["Xiaohongshu Platform"]
+
+    F --> K["Account Config (accounts.json)"]
+    H --> L["Isolated Cookie Storage"]
+    G --> M["Health / Audit / Metrics"]
+```
+
+## Deployment Flow
+
+```mermaid
+flowchart TD
+    A["Clone the repository"] --> B["Choose deployment mode"]
+
+    B --> C["Docker deployment"]
+    B --> D["Source deployment"]
+    B --> E["OpenClaw deployment"]
+
+    C --> F["Configure accounts.json"]
+    D --> F
+    E --> G["Select package<br/>openclaw-lite / openclaw-source-lite"]
+    G --> F
+
+    F --> H["Start the service"]
+    H --> I["Check /health"]
+    I --> J["Check /api/v1/accounts"]
+    J --> K["Register MCP in OpenClaw"]
+    K --> L["Complete QR login"]
+    L --> M["Run publish / search / comment workflows"]
+```
+
 ## Highlights
 
 - Multi-tenant routing via `tenant_id`

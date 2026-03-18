@@ -8,6 +8,55 @@
 - 需要在 `Windows`、`macOS`、`Linux`、`Docker`、`OpenClaw` 等环境稳定部署
 - 需要图文发布、视频发布、搜索、评论、资料查询等自动化能力
 
+## 系统架构图
+
+```mermaid
+flowchart LR
+    subgraph "调用入口"
+        A["OpenClaw"]
+        B["内部 AI 应用"]
+        C["运维脚本 / 管理端"]
+    end
+
+    A --> D["MCP Endpoint (/mcp)"]
+    B --> D
+    C --> E["HTTP API (/api/v1/*)"]
+
+    D --> F["租户与账号路由层"]
+    E --> F
+    F --> G["并发控制器"]
+    G --> H["登录态与会话管理"]
+    H --> I["浏览器自动化层"]
+    I --> J["小红书平台"]
+
+    F --> K["账号配置 accounts.json"]
+    H --> L["Cookie 隔离存储"]
+    G --> M["健康检查 / 审计 / 监控"]
+```
+
+## 部署流程图
+
+```mermaid
+flowchart TD
+    A["获取仓库源码"] --> B["选择部署方式"]
+
+    B --> C["Docker 部署"]
+    B --> D["源码部署"]
+    B --> E["OpenClaw 部署"]
+
+    C --> F["配置 accounts.json"]
+    D --> F
+    E --> G["选择交付包<br/>openclaw-lite / openclaw-source-lite"]
+    G --> F
+
+    F --> H["启动服务"]
+    H --> I["检查 /health"]
+    I --> J["检查 /api/v1/accounts"]
+    J --> K["在 OpenClaw 中注册 MCP"]
+    K --> L["执行二维码登录"]
+    L --> M["开始发布 / 搜索 / 评论等业务调用"]
+```
+
 ## 核心能力
 
 - 多租户隔离：通过 `tenant_id` 区分企业、品牌或业务线
