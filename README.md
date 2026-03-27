@@ -177,7 +177,7 @@ http://127.0.0.1:18060/mcp
 - 企业级能力说明：[docs/enterprise_deployment.md](./docs/enterprise_deployment.md)
 - HTTP API 文档：[docs/API.md](./docs/API.md)
 - 企业 API 扩展：[docs/API_ENTERPRISE.md](./docs/API_ENTERPRISE.md)
-- OpenClaw MCP 使用文档：[docs/OPENCLAW_MCP_USAGE.md](./docs/OPENCLAW_MCP_USAGE.md)
+- OpenClaw MCP 全量手册：[docs/OPENCLAW_MCP_USAGE.md](./docs/OPENCLAW_MCP_USAGE.md)
 - Docker 部署：[docs/docker_deployment.md](./docs/docker_deployment.md)
 - 源码部署：[docs/source_deployment.md](./docs/source_deployment.md)
 - OpenClaw 部署：[docs/openclaw_deployment.md](./docs/openclaw_deployment.md)
