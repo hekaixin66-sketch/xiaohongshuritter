@@ -10,6 +10,18 @@ chmod +x scripts/*.sh
 ./scripts/install.sh
 ```
 
+日常更新推荐：
+
+```bash
+./scripts/update.sh
+```
+
+如果 Docker 缓存脏了、Chromium 异常或镜像状态可疑：
+
+```bash
+./scripts/update.sh --full
+```
+
 安装完成后检查：
 
 ```bash

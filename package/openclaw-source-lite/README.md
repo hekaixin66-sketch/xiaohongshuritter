@@ -30,6 +30,20 @@ chmod +x scripts/*.sh
 ./scripts/install.sh
 ```
 
+## Update
+
+Normal update:
+
+```bash
+./scripts/update.sh
+```
+
+Force a full rebuild:
+
+```bash
+./scripts/update.sh --full
+```
+
 ## MCP endpoint
 
 - `http://<SERVER_IP>:18060/mcp`
