@@ -32,6 +32,9 @@ type PublishContentArgs struct {
 	IsOriginal bool     `json:"is_original,omitempty" jsonschema:"declare original content"`
 	Visibility string   `json:"visibility,omitempty" jsonschema:"visibility level"`
 	Products   []string `json:"products,omitempty" jsonschema:"product search keywords"`
+	TaskID     string   `json:"task_id,omitempty" jsonschema:"optional external task id"`
+	BatchID    string   `json:"batch_id,omitempty" jsonschema:"optional batch id"`
+	Mode       string   `json:"mode,omitempty" jsonschema:"sync or async"`
 }
 
 // PublishVideoArgs MCP args for video publish.
@@ -44,6 +47,24 @@ type PublishVideoArgs struct {
 	ScheduleAt string   `json:"schedule_at,omitempty" jsonschema:"RFC3339 schedule time"`
 	Visibility string   `json:"visibility,omitempty" jsonschema:"visibility level"`
 	Products   []string `json:"products,omitempty" jsonschema:"product keywords"`
+	TaskID     string   `json:"task_id,omitempty" jsonschema:"optional external task id"`
+	BatchID    string   `json:"batch_id,omitempty" jsonschema:"optional batch id"`
+	Mode       string   `json:"mode,omitempty" jsonschema:"sync or async"`
+}
+
+type StageImagesArgs struct {
+	Images []string `json:"images" jsonschema:"image urls or absolute local file paths"`
+}
+
+type PublishJobStatusArgs struct {
+	JobID string `json:"job_id" jsonschema:"publish job id"`
+}
+
+type SchedulerRecommendationArgs struct {
+	AccountScopedArgs
+	PreferredAccounts []string `json:"preferred_accounts,omitempty" jsonschema:"optional preferred account ids"`
+	Limit             int      `json:"limit,omitempty" jsonschema:"max candidates to return"`
+	RequireCookie     *bool    `json:"require_cookie,omitempty" jsonschema:"require cookie file to consider account ready"`
 }
 
 // SearchFeedsArgs MCP args for search.
@@ -170,7 +191,9 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 			if scopeErr != nil {
 				return scopeErr, nil, nil
 			}
-			result := appServer.handleCheckLoginStatus(scopedCtx)
+			opCtx, cancel := appServer.withOperationTimeout(scopedCtx, OperationCheckLoginStatus)
+			defer cancel()
+			result := appServer.handleCheckLoginStatus(opCtx)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)
@@ -186,7 +209,9 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 			if scopeErr != nil {
 				return scopeErr, nil, nil
 			}
-			result := appServer.handleGetLoginQrcode(scopedCtx)
+			opCtx, cancel := appServer.withOperationTimeout(scopedCtx, OperationGetLoginQRCode)
+			defer cancel()
+			result := appServer.handleGetLoginQrcode(opCtx)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)
@@ -202,7 +227,9 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 			if scopeErr != nil {
 				return scopeErr, nil, nil
 			}
-			result := appServer.handleDeleteCookies(scopedCtx)
+			opCtx, cancel := appServer.withOperationTimeout(scopedCtx, OperationDeleteCookies)
+			defer cancel()
+			result := appServer.handleDeleteCookies(opCtx)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)
@@ -214,7 +241,114 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 			Annotations: &mcp.ToolAnnotations{Title: "List Accounts", ReadOnlyHint: true},
 		},
 		withPanicRecovery("list_accounts", func(ctx context.Context, req *mcp.CallToolRequest, _ any) (*mcp.CallToolResult, any, error) {
-			result := appServer.handleListAccounts(ctx)
+			opCtx, cancel := appServer.withOperationTimeout(ctx, OperationListAccounts)
+			defer cancel()
+			result := appServer.handleListAccounts(opCtx)
+			return convertToMCPResult(result), nil, nil
+		}),
+	)
+
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "recommend_publish_accounts",
+			Description: "return the best current accounts for async publish scheduling",
+			Annotations: &mcp.ToolAnnotations{Title: "Recommend Publish Accounts", ReadOnlyHint: true},
+		},
+		withPanicRecovery("recommend_publish_accounts", func(ctx context.Context, req *mcp.CallToolRequest, args SchedulerRecommendationArgs) (*mcp.CallToolResult, any, error) {
+			opCtx, cancel := appServer.withOperationTimeout(ctx, OperationListAccounts)
+			defer cancel()
+			result := appServer.handleRecommendAccounts(opCtx, args)
+			return convertToMCPResult(result), nil, nil
+		}),
+	)
+
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "stage_image_for_publish",
+			Description: "copy images into the standardized publish staging directory",
+			Annotations: &mcp.ToolAnnotations{Title: "Stage Images", ReadOnlyHint: true},
+		},
+		withPanicRecovery("stage_image_for_publish", func(ctx context.Context, req *mcp.CallToolRequest, args StageImagesArgs) (*mcp.CallToolResult, any, error) {
+			opCtx, cancel := appServer.withOperationTimeout(ctx, OperationStageImagePublish)
+			defer cancel()
+			result := appServer.handleStageImages(opCtx, args)
+			return convertToMCPResult(result), nil, nil
+		}),
+	)
+
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "submit_publish_content_async",
+			Description: "accept an async xiaohongshu image publish job and return a job id",
+			Annotations: &mcp.ToolAnnotations{Title: "Submit Publish Content Async", DestructiveHint: boolPtr(true)},
+		},
+		withPanicRecovery("submit_publish_content_async", func(ctx context.Context, req *mcp.CallToolRequest, args PublishContentArgs) (*mcp.CallToolResult, any, error) {
+			scopedCtx, scopeErr := resolveScopedContext(appServer, ctx, args.Scope())
+			if scopeErr != nil {
+				return scopeErr, nil, nil
+			}
+			scopedCtx = withOperationMetadata(scopedCtx, operationMetadata{Name: OperationPublishContentAsync, TaskID: args.TaskID, BatchID: args.BatchID})
+			opCtx, cancel := appServer.withOperationTimeout(scopedCtx, OperationPublishContentAsync)
+			defer cancel()
+			argsMap := map[string]interface{}{
+				"title":       args.Title,
+				"content":     args.Content,
+				"images":      convertStringsToInterfaces(args.Images),
+				"tags":        convertStringsToInterfaces(args.Tags),
+				"schedule_at": args.ScheduleAt,
+				"is_original": args.IsOriginal,
+				"visibility":  args.Visibility,
+				"products":    convertStringsToInterfaces(args.Products),
+				"task_id":     args.TaskID,
+				"batch_id":    args.BatchID,
+				"mode":        string(PublishModeAsync),
+			}
+			result := appServer.handlePublishContent(opCtx, argsMap)
+			return convertToMCPResult(result), nil, nil
+		}),
+	)
+
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "submit_publish_video_async",
+			Description: "accept an async xiaohongshu video publish job and return a job id",
+			Annotations: &mcp.ToolAnnotations{Title: "Submit Publish Video Async", DestructiveHint: boolPtr(true)},
+		},
+		withPanicRecovery("submit_publish_video_async", func(ctx context.Context, req *mcp.CallToolRequest, args PublishVideoArgs) (*mcp.CallToolResult, any, error) {
+			scopedCtx, scopeErr := resolveScopedContext(appServer, ctx, args.Scope())
+			if scopeErr != nil {
+				return scopeErr, nil, nil
+			}
+			scopedCtx = withOperationMetadata(scopedCtx, operationMetadata{Name: OperationPublishVideoAsync, TaskID: args.TaskID, BatchID: args.BatchID})
+			opCtx, cancel := appServer.withOperationTimeout(scopedCtx, OperationPublishVideoAsync)
+			defer cancel()
+			argsMap := map[string]interface{}{
+				"title":       args.Title,
+				"content":     args.Content,
+				"video":       args.Video,
+				"tags":        convertStringsToInterfaces(args.Tags),
+				"schedule_at": args.ScheduleAt,
+				"visibility":  args.Visibility,
+				"products":    convertStringsToInterfaces(args.Products),
+				"task_id":     args.TaskID,
+				"batch_id":    args.BatchID,
+				"mode":        string(PublishModeAsync),
+			}
+			result := appServer.handlePublishVideo(opCtx, argsMap)
+			return convertToMCPResult(result), nil, nil
+		}),
+	)
+
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "get_publish_job_status",
+			Description: "get async publish job status and final result",
+			Annotations: &mcp.ToolAnnotations{Title: "Get Publish Job Status", ReadOnlyHint: true},
+		},
+		withPanicRecovery("get_publish_job_status", func(ctx context.Context, req *mcp.CallToolRequest, args PublishJobStatusArgs) (*mcp.CallToolResult, any, error) {
+			opCtx, cancel := appServer.withOperationTimeout(ctx, OperationPublishJobStatus)
+			defer cancel()
+			result := appServer.handlePublishJobStatus(opCtx, args.JobID)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)
@@ -230,6 +364,13 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 			if scopeErr != nil {
 				return scopeErr, nil, nil
 			}
+			op := OperationPublishContent
+			if isAsyncMode(args.Mode) {
+				op = OperationPublishContentAsync
+			}
+			scopedCtx = withOperationMetadata(scopedCtx, operationMetadata{Name: op, TaskID: args.TaskID, BatchID: args.BatchID})
+			opCtx, cancel := appServer.withOperationTimeout(scopedCtx, op)
+			defer cancel()
 			argsMap := map[string]interface{}{
 				"title":       args.Title,
 				"content":     args.Content,
@@ -239,8 +380,11 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 				"is_original": args.IsOriginal,
 				"visibility":  args.Visibility,
 				"products":    convertStringsToInterfaces(args.Products),
+				"task_id":     args.TaskID,
+				"batch_id":    args.BatchID,
+				"mode":        args.Mode,
 			}
-			result := appServer.handlePublishContent(scopedCtx, argsMap)
+			result := appServer.handlePublishContent(opCtx, argsMap)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)
@@ -256,7 +400,9 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 			if scopeErr != nil {
 				return scopeErr, nil, nil
 			}
-			result := appServer.handleListFeeds(scopedCtx)
+			opCtx, cancel := appServer.withOperationTimeout(scopedCtx, OperationListFeeds)
+			defer cancel()
+			result := appServer.handleListFeeds(opCtx)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)
@@ -272,7 +418,9 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 			if scopeErr != nil {
 				return scopeErr, nil, nil
 			}
-			result := appServer.handleSearchFeeds(scopedCtx, args)
+			opCtx, cancel := appServer.withOperationTimeout(scopedCtx, OperationSearchFeeds)
+			defer cancel()
+			result := appServer.handleSearchFeeds(opCtx, args)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)
@@ -288,6 +436,8 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 			if scopeErr != nil {
 				return scopeErr, nil, nil
 			}
+			opCtx, cancel := appServer.withOperationTimeout(scopedCtx, OperationGetFeedDetail)
+			defer cancel()
 			argsMap := map[string]interface{}{
 				"feed_id":           args.FeedID,
 				"xsec_token":        args.XsecToken,
@@ -309,7 +459,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 					argsMap["scroll_speed"] = args.ScrollSpeed
 				}
 			}
-			result := appServer.handleGetFeedDetail(scopedCtx, argsMap)
+			result := appServer.handleGetFeedDetail(opCtx, argsMap)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)
@@ -325,8 +475,10 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 			if scopeErr != nil {
 				return scopeErr, nil, nil
 			}
+			opCtx, cancel := appServer.withOperationTimeout(scopedCtx, OperationUserProfile)
+			defer cancel()
 			argsMap := map[string]interface{}{"user_id": args.UserID, "xsec_token": args.XsecToken}
-			result := appServer.handleUserProfile(scopedCtx, argsMap)
+			result := appServer.handleUserProfile(opCtx, argsMap)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)
@@ -342,8 +494,10 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 			if scopeErr != nil {
 				return scopeErr, nil, nil
 			}
+			opCtx, cancel := appServer.withOperationTimeout(scopedCtx, OperationPostComment)
+			defer cancel()
 			argsMap := map[string]interface{}{"feed_id": args.FeedID, "xsec_token": args.XsecToken, "content": args.Content}
-			result := appServer.handlePostComment(scopedCtx, argsMap)
+			result := appServer.handlePostComment(opCtx, argsMap)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)
@@ -359,6 +513,8 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 			if scopeErr != nil {
 				return scopeErr, nil, nil
 			}
+			opCtx, cancel := appServer.withOperationTimeout(scopedCtx, OperationReplyComment)
+			defer cancel()
 			if args.CommentID == "" && args.UserID == "" {
 				return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: "missing comment_id or user_id"}}}, nil, nil
 			}
@@ -369,7 +525,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 				"user_id":    args.UserID,
 				"content":    args.Content,
 			}
-			result := appServer.handleReplyComment(scopedCtx, argsMap)
+			result := appServer.handleReplyComment(opCtx, argsMap)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)
@@ -385,6 +541,13 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 			if scopeErr != nil {
 				return scopeErr, nil, nil
 			}
+			op := OperationPublishVideo
+			if isAsyncMode(args.Mode) {
+				op = OperationPublishVideoAsync
+			}
+			scopedCtx = withOperationMetadata(scopedCtx, operationMetadata{Name: op, TaskID: args.TaskID, BatchID: args.BatchID})
+			opCtx, cancel := appServer.withOperationTimeout(scopedCtx, op)
+			defer cancel()
 			argsMap := map[string]interface{}{
 				"title":       args.Title,
 				"content":     args.Content,
@@ -393,8 +556,11 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 				"schedule_at": args.ScheduleAt,
 				"visibility":  args.Visibility,
 				"products":    convertStringsToInterfaces(args.Products),
+				"task_id":     args.TaskID,
+				"batch_id":    args.BatchID,
+				"mode":        args.Mode,
 			}
-			result := appServer.handlePublishVideo(scopedCtx, argsMap)
+			result := appServer.handlePublishVideo(opCtx, argsMap)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)
@@ -410,8 +576,10 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 			if scopeErr != nil {
 				return scopeErr, nil, nil
 			}
+			opCtx, cancel := appServer.withOperationTimeout(scopedCtx, OperationLikeFeed)
+			defer cancel()
 			argsMap := map[string]interface{}{"feed_id": args.FeedID, "xsec_token": args.XsecToken, "unlike": args.Unlike}
-			result := appServer.handleLikeFeed(scopedCtx, argsMap)
+			result := appServer.handleLikeFeed(opCtx, argsMap)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)
@@ -427,13 +595,15 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 			if scopeErr != nil {
 				return scopeErr, nil, nil
 			}
+			opCtx, cancel := appServer.withOperationTimeout(scopedCtx, OperationFavoriteFeed)
+			defer cancel()
 			argsMap := map[string]interface{}{"feed_id": args.FeedID, "xsec_token": args.XsecToken, "unfavorite": args.Unfavorite}
-			result := appServer.handleFavoriteFeed(scopedCtx, argsMap)
+			result := appServer.handleFavoriteFeed(opCtx, argsMap)
 			return convertToMCPResult(result), nil, nil
 		}),
 	)
 
-	logrus.Infof("Registered %d MCP tools", 14)
+	logrus.Infof("Registered %d MCP tools", 19)
 }
 
 func convertToMCPResult(result *MCPToolResult) *mcp.CallToolResult {

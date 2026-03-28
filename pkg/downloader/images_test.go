@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/hekaixin66-sketch/xiaohongshuritter/configs"
 )
 
 func TestIsImageURL(t *testing.T) {
@@ -173,5 +175,34 @@ func TestDownloadImage_AntiHotlink_External(t *testing.T) {
 	}
 	if info.Size() == 0 {
 		t.Fatalf("下载文件为空")
+	}
+}
+
+func TestImageProcessorStagesLocalFiles(t *testing.T) {
+	stageDir := t.TempDir()
+	sourceDir := t.TempDir()
+	sourcePath := filepath.Join(sourceDir, "source.jpg")
+	if err := os.WriteFile(sourcePath, []byte("fake-image"), 0644); err != nil {
+		t.Fatalf("write source image failed: %v", err)
+	}
+
+	t.Setenv("XHS_STAGE_IMAGE_DIR", stageDir)
+
+	processor := NewImageProcessor()
+	paths, err := processor.ProcessImages([]string{sourcePath})
+	if err != nil {
+		t.Fatalf("ProcessImages failed: %v", err)
+	}
+	if len(paths) != 1 {
+		t.Fatalf("expected one staged path, got %d", len(paths))
+	}
+	if filepath.Dir(paths[0]) != filepath.Clean(configs.GetImagesPath()) {
+		t.Fatalf("expected staged image in %s, got %s", configs.GetImagesPath(), paths[0])
+	}
+	if paths[0] == sourcePath {
+		t.Fatalf("expected source image to be copied into staging dir")
+	}
+	if _, err := os.Stat(paths[0]); err != nil {
+		t.Fatalf("staged image missing: %v", err)
 	}
 }

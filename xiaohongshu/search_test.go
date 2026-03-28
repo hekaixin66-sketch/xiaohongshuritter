@@ -3,15 +3,17 @@ package xiaohongshu
 import (
 	"context"
 	"fmt"
+	"os"
 	"testing"
 
-	"github.com/stretchr/testify/require"
 	"github.com/hekaixin66-sketch/xiaohongshuritter/browser"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSearch(t *testing.T) {
-
-	t.Skip("SKIP: 测试发布")
+	if os.Getenv("XHS_RUN_BROWSER_TESTS") != "1" {
+		t.Skip("skip browser integration test; set XHS_RUN_BROWSER_TESTS=1 to enable")
+	}
 
 	b := browser.NewBrowser(false)
 	defer b.Close()
@@ -36,8 +38,9 @@ func TestSearch(t *testing.T) {
 }
 
 func TestSearchWithFilters(t *testing.T) {
-
-	//t.Skip("SKIP: 测试筛选功能")
+	if os.Getenv("XHS_RUN_BROWSER_TESTS") != "1" {
+		t.Skip("skip browser integration test; set XHS_RUN_BROWSER_TESTS=1 to enable")
+	}
 
 	b := browser.NewBrowser(false)
 	defer b.Close()

@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sirupsen/logrus"
 	"github.com/hekaixin66-sketch/xiaohongshuritter/xiaohongshu"
+	"github.com/sirupsen/logrus"
 )
 
 func parseVisibility(args map[string]interface{}) string {
@@ -21,6 +21,27 @@ func parseVisibility(args map[string]interface{}) string {
 		return s
 	}
 	return ""
+}
+
+func parseMode(args map[string]interface{}) string {
+	mode, _ := args["mode"].(string)
+	return mode
+}
+
+func jsonToolResult(data any, isError bool) *MCPToolResult {
+	jsonData, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		logrus.WithError(err).Error("marshal MCP response failed")
+		return &MCPToolResult{
+			Content: []MCPContent{{Type: "text", Text: `{"ok":false,"error_code":"MARSHAL_FAILED","error_message":"failed to encode response"}`}},
+			IsError: true,
+		}
+	}
+	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: string(jsonData)}}, IsError: isError}
+}
+
+func errorToolResult(err error, details any) *MCPToolResult {
+	return jsonToolResult(mergeErrorDetails(err, details), true)
 }
 
 func (s *AppServer) handleCheckLoginStatus(ctx context.Context) *MCPToolResult {
@@ -82,6 +103,9 @@ func (s *AppServer) handlePublishContent(ctx context.Context, args map[string]in
 	scheduleAt, _ := args["schedule_at"].(string)
 	visibility := parseVisibility(args)
 	isOriginal, _ := args["is_original"].(bool)
+	taskID, _ := args["task_id"].(string)
+	batchID, _ := args["batch_id"].(string)
+	mode := parseMode(args)
 
 	req := &PublishRequest{
 		Title:      title,
@@ -92,14 +116,26 @@ func (s *AppServer) handlePublishContent(ctx context.Context, args map[string]in
 		IsOriginal: isOriginal,
 		Visibility: visibility,
 		Products:   products,
+		TaskID:     taskID,
+		BatchID:    batchID,
+		Mode:       mode,
+	}
+
+	if isAsyncMode(mode) {
+		scope := AccountScopeFromContext(ctx)
+		result, err := s.jobManager.SubmitContent(scope, req)
+		if err != nil {
+			return errorToolResult(err, nil)
+		}
+		return jsonToolResult(result, false)
 	}
 
 	result, err := s.xiaohongshuService.PublishContent(ctx, req)
 	if err != nil {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "publish failed: " + err.Error()}}, IsError: true}
+		return errorToolResult(err, result)
 	}
 
-	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: fmt.Sprintf("publish success: %+v", result)}}}
+	return jsonToolResult(result, false)
 }
 
 func (s *AppServer) handlePublishVideo(ctx context.Context, args map[string]interface{}) *MCPToolResult {
@@ -110,9 +146,12 @@ func (s *AppServer) handlePublishVideo(ctx context.Context, args map[string]inte
 	products := parseStringSlice(args["products"])
 	scheduleAt, _ := args["schedule_at"].(string)
 	visibility := parseVisibility(args)
+	taskID, _ := args["task_id"].(string)
+	batchID, _ := args["batch_id"].(string)
+	mode := parseMode(args)
 
 	if videoPath == "" {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "publish failed: missing video path"}}, IsError: true}
+		return errorToolResult(newAppError("VIDEO_REQUIRED", "video path is required", 400, false, nil, nil), nil)
 	}
 
 	req := &PublishVideoRequest{
@@ -123,14 +162,52 @@ func (s *AppServer) handlePublishVideo(ctx context.Context, args map[string]inte
 		ScheduleAt: scheduleAt,
 		Visibility: visibility,
 		Products:   products,
+		TaskID:     taskID,
+		BatchID:    batchID,
+		Mode:       mode,
+	}
+
+	if isAsyncMode(mode) {
+		scope := AccountScopeFromContext(ctx)
+		result, err := s.jobManager.SubmitVideo(scope, req)
+		if err != nil {
+			return errorToolResult(err, nil)
+		}
+		return jsonToolResult(result, false)
 	}
 
 	result, err := s.xiaohongshuService.PublishVideo(ctx, req)
 	if err != nil {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "publish video failed: " + err.Error()}}, IsError: true}
+		return errorToolResult(err, result)
 	}
 
-	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: fmt.Sprintf("publish video success: %+v", result)}}}
+	return jsonToolResult(result, false)
+}
+
+func (s *AppServer) handlePublishJobStatus(_ context.Context, jobID string) *MCPToolResult {
+	result, err := s.jobManager.Get(jobID)
+	if err != nil {
+		return errorToolResult(err, nil)
+	}
+	return jsonToolResult(result, false)
+}
+
+func (s *AppServer) handleRecommendAccounts(_ context.Context, args SchedulerRecommendationArgs) *MCPToolResult {
+	result := s.RecommendAccountsForPublish(SchedulerRecommendationRequest{
+		AccountScope:      args.Scope(),
+		PreferredAccounts: copyStrings(args.PreferredAccounts),
+		Limit:             args.Limit,
+		RequireCookie:     args.RequireCookie,
+	})
+	return jsonToolResult(result, false)
+}
+
+func (s *AppServer) handleStageImages(_ context.Context, args StageImagesArgs) *MCPToolResult {
+	result, err := s.xiaohongshuService.StageImages(args.Images)
+	if err != nil {
+		return errorToolResult(err, nil)
+	}
+	return jsonToolResult(result, false)
 }
 
 func (s *AppServer) handleListFeeds(ctx context.Context) *MCPToolResult {
@@ -394,16 +471,16 @@ func (s *AppServer) handleReplyComment(ctx context.Context, args map[string]inte
 }
 
 func (s *AppServer) handleListAccounts(ctx context.Context) *MCPToolResult {
+	queueStats := s.jobManager.QueueStats()
 	data := map[string]any{
-		"config_path": s.xiaohongshuService.AccountConfigPath(),
-		"accounts":    s.xiaohongshuService.ListAccounts(),
+		"config_path":      s.xiaohongshuService.AccountConfigPath(),
+		"accounts":         decorateAccountInfosWithQueueStats(s.xiaohongshuService.ListAccounts(), queueStats),
+		"runtime":          s.xiaohongshuService.RuntimeStats(),
+		"job_runtime":      s.jobManager.RuntimeStats(),
+		"job_queues":       queueStats,
+		"global_in_flight": s.xiaohongshuService.accountManager.GlobalInFlight(),
 	}
-	jsonData, err := json.MarshalIndent(data, "", "  ")
-	if err != nil {
-		logrus.WithError(err).Error("marshal list accounts failed")
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "list accounts failed: marshal error"}}, IsError: true}
-	}
-	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: string(jsonData)}}}
+	return jsonToolResult(data, false)
 }
 
 func parseStringSlice(raw any) []string {

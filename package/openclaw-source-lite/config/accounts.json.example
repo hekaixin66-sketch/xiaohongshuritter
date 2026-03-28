@@ -1,7 +1,7 @@
 {
   "default_tenant": "default",
   "default_account": "default",
-  "global_max_concurrency": 8,
+  "global_max_concurrency": 4,
   "acquire_timeout_seconds": 180,
   "tenants": [
     {
@@ -13,7 +13,7 @@
           "id": "default",
           "name": "Default Account",
           "cookie_path": "/app/data/default/default/cookies.json",
-          "max_concurrency": 2,
+          "max_concurrency": 1,
           "headless": true
         }
       ]

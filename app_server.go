@@ -16,6 +16,7 @@ import (
 // AppServer 应用服务器结构体，封装所有服务和处理器
 type AppServer struct {
 	xiaohongshuService *XiaohongshuService
+	jobManager         *PublishJobManager
 	mcpServer          *mcp.Server
 	router             *gin.Engine
 	httpServer         *http.Server
@@ -26,6 +27,12 @@ func NewAppServer(xiaohongshuService *XiaohongshuService) *AppServer {
 	appServer := &AppServer{
 		xiaohongshuService: xiaohongshuService,
 	}
+	appServer.jobManager = NewPublishJobManager(
+		appServer.withOperationTimeout,
+		xiaohongshuService.PublishContent,
+		xiaohongshuService.PublishVideo,
+		xiaohongshuService.accountManager.Resolve,
+	)
 
 	// 初始化 MCP Server（需要在创建 appServer 之后，因为工具注册需要访问 appServer）
 	appServer.mcpServer = InitMCPServer(appServer)
@@ -36,10 +43,17 @@ func NewAppServer(xiaohongshuService *XiaohongshuService) *AppServer {
 // Start 启动服务器
 func (s *AppServer) Start(port string) error {
 	s.router = setupRoutes(s)
+	maintenanceCtx, maintenanceCancel := context.WithCancel(context.Background())
+	defer maintenanceCancel()
+	s.xiaohongshuService.StartMaintenance(maintenanceCtx)
 
 	s.httpServer = &http.Server{
-		Addr:    port,
-		Handler: s.router,
+		Addr:              port,
+		Handler:           s.router,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      330 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	// 启动服务器的 goroutine
@@ -57,6 +71,7 @@ func (s *AppServer) Start(port string) error {
 	<-quit
 
 	logrus.Infof("正在关闭服务器...")
+	maintenanceCancel()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

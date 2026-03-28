@@ -76,3 +76,46 @@ func TestAccountManagerAcquireLimit(t *testing.T) {
 		t.Fatalf("acquire after release failed: %v", err)
 	}
 }
+
+func TestAccountManagerCooldownAfterRepeatedRetryableFailures(t *testing.T) {
+	cfg := EnterpriseAccountConfig{
+		DefaultTenant:        "tenant-a",
+		DefaultAccount:       "account-a",
+		GlobalMaxConcurrency: 2,
+		Tenants: []EnterpriseTenantConfig{
+			{
+				ID:             "tenant-a",
+				DefaultAccount: "account-a",
+				Accounts: []EnterpriseProfileConfig{
+					{ID: "account-a", CookiePath: "./data/a.json", MaxConcurrency: 1},
+				},
+			},
+		},
+	}
+
+	manager, err := buildAccountManager("test.json", cfg, 1)
+	if err != nil {
+		t.Fatalf("build manager failed: %v", err)
+	}
+	manager.cooldownAfter = 2
+	manager.cooldownPeriod = time.Minute
+
+	scope := AccountScope{TenantID: "tenant-a", AccountID: "account-a"}
+	retryableErr := newAppError("OPERATION_TIMEOUT", "operation timed out", 504, true, context.DeadlineExceeded, nil)
+
+	manager.RecordPublishResult(scope, retryableErr)
+	manager.RecordPublishResult(scope, retryableErr)
+
+	_, err = manager.Acquire(context.Background(), scope)
+	if err == nil {
+		t.Fatal("expected acquire to fail during cooldown")
+	}
+
+	appErr, ok := asAppError(err)
+	if !ok {
+		t.Fatalf("expected AppError, got %T", err)
+	}
+	if appErr.Code != "ACCOUNT_COOLDOWN" {
+		t.Fatalf("unexpected error code: %s", appErr.Code)
+	}
+}

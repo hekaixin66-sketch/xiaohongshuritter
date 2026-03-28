@@ -6,21 +6,24 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-rod/rod"
-	"github.com/sirupsen/logrus"
-	"github.com/xpzouying/headless_browser"
 	"github.com/hekaixin66-sketch/xiaohongshuritter/browser"
 	"github.com/hekaixin66-sketch/xiaohongshuritter/cookies"
 	"github.com/hekaixin66-sketch/xiaohongshuritter/pkg/downloader"
 	"github.com/hekaixin66-sketch/xiaohongshuritter/pkg/xhsutil"
 	"github.com/hekaixin66-sketch/xiaohongshuritter/xiaohongshu"
+	"github.com/sirupsen/logrus"
+	"github.com/xpzouying/headless_browser"
 )
 
 // XiaohongshuService encapsulates business operations.
 type XiaohongshuService struct {
 	accountManager *AccountManager
+	metrics        *ServiceMetrics
+	browserGuard   *BrowserGuard
 }
 
 func NewXiaohongshuService() (*XiaohongshuService, error) {
@@ -28,7 +31,12 @@ func NewXiaohongshuService() (*XiaohongshuService, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &XiaohongshuService{accountManager: manager}, nil
+	metrics := NewServiceMetrics()
+	return &XiaohongshuService{
+		accountManager: manager,
+		metrics:        metrics,
+		browserGuard:   NewBrowserGuard(manager.GlobalConcurrencyLimit(), metrics),
+	}, nil
 }
 
 func (s *XiaohongshuService) ResolveScope(scope AccountScope) (AccountScope, error) {
@@ -47,6 +55,17 @@ func (s *XiaohongshuService) AccountConfigPath() string {
 	return s.accountManager.ConfigPath()
 }
 
+func (s *XiaohongshuService) RuntimeStats() RuntimeStats {
+	return s.metrics.Snapshot()
+}
+
+func (s *XiaohongshuService) StartMaintenance(ctx context.Context) {
+	if s == nil || s.browserGuard == nil {
+		return
+	}
+	s.browserGuard.Start(ctx, s.metrics.ActiveBrowserSessions)
+}
+
 // PublishRequest is request payload for image posts.
 type PublishRequest struct {
 	AccountScope
@@ -58,6 +77,9 @@ type PublishRequest struct {
 	IsOriginal bool     `json:"is_original,omitempty"`
 	Visibility string   `json:"visibility,omitempty"`
 	Products   []string `json:"products,omitempty"`
+	TaskID     string   `json:"task_id,omitempty"`
+	BatchID    string   `json:"batch_id,omitempty"`
+	Mode       string   `json:"mode,omitempty"`
 }
 
 // LoginStatusResponse login status payload.
@@ -92,6 +114,9 @@ type PublishVideoRequest struct {
 	ScheduleAt string   `json:"schedule_at,omitempty"`
 	Visibility string   `json:"visibility,omitempty"`
 	Products   []string `json:"products,omitempty"`
+	TaskID     string   `json:"task_id,omitempty"`
+	BatchID    string   `json:"batch_id,omitempty"`
+	Mode       string   `json:"mode,omitempty"`
 }
 
 // PublishVideoResponse publish response payload.
@@ -158,14 +183,25 @@ func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeRe
 	if err != nil {
 		return nil, err
 	}
+	releaseBrowserSlot, err := s.browserGuard.Acquire(ctx)
+	if err != nil {
+		session.Release()
+		return nil, err
+	}
 
 	b := newBrowserForSession(session)
+	s.metrics.BrowserSessionStarted()
 	page := b.NewPage()
+	var cleanupOnce sync.Once
 
 	cleanup := func() {
-		_ = page.Close()
-		b.Close()
-		session.Release()
+		cleanupOnce.Do(func() {
+			_ = page.Close()
+			b.Close()
+			session.Release()
+			releaseBrowserSlot()
+			s.metrics.BrowserSessionEnded()
+		})
 	}
 
 	loginAction := xiaohongshu.NewLogin(page)
@@ -205,69 +241,94 @@ func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeRe
 	}, nil
 }
 
-func (s *XiaohongshuService) PublishContent(ctx context.Context, req *PublishRequest) (*PublishResponse, error) {
+func (s *XiaohongshuService) PublishContent(ctx context.Context, req *PublishRequest) (result *PublishExecutionResult, err error) {
+	scope := AccountScopeFromContext(ctx)
+	meta := operationMetadataFromContext(ctx)
+	startedAt := time.Now().UTC()
+
+	result = newPublishExecutionResult(OperationPublishContent, scope, req.Title, req.Content, firstNonEmpty(req.TaskID, meta.TaskID), firstNonEmpty(req.BatchID, meta.BatchID))
+	result.ImagePaths = copyStrings(req.Images)
+	result.PublishStartAt = formatTime(startedAt)
+
+	defer func() {
+		s.finishPublishExecution(scope, startedAt, result, err)
+	}()
+
+	if len(req.Images) == 0 {
+		err = newAppError("IMAGES_REQUIRED", "images are required", 400, false, nil, nil)
+		return result, err
+	}
 	if xhsutil.CalcTitleLength(req.Title) > 20 {
-		return nil, fmt.Errorf("title length exceeds limit")
+		err = newAppError("TITLE_TOO_LONG", "title length exceeds limit", 400, false, nil, nil)
+		return result, err
 	}
 
-	visibility, err := normalizeVisibility(req.Visibility)
-	if err != nil {
-		return nil, err
+	visibility, visibilityErr := normalizeVisibility(req.Visibility)
+	if visibilityErr != nil {
+		err = newAppError("INVALID_VISIBILITY", "unsupported visibility", 400, false, visibilityErr, nil)
+		return result, err
 	}
 
-	imagePaths, err := s.processImages(req.Images)
-	if err != nil {
-		return nil, err
+	stageResult, stageErr := s.StageImages(req.Images)
+	if stageErr != nil {
+		err = stageErr
+		return result, err
 	}
+	result.StagedImagePaths = copyStrings(stageResult.StagedImagePaths)
+	result.ImagePath = firstString(stageResult.StagedImagePaths)
 
-	var scheduleTime *time.Time
-	if req.ScheduleAt != "" {
-		t, err := time.Parse(time.RFC3339, req.ScheduleAt)
-		if err != nil {
-			return nil, fmt.Errorf("invalid schedule_at format: %w", err)
-		}
-
-		now := time.Now()
-		minTime := now.Add(1 * time.Hour)
-		maxTime := now.Add(14 * 24 * time.Hour)
-
-		if t.Before(minTime) {
-			return nil, fmt.Errorf("schedule_at must be at least 1 hour later: got %s earliest %s", t.Format("2006-01-02 15:04"), minTime.Format("2006-01-02 15:04"))
-		}
-		if t.After(maxTime) {
-			return nil, fmt.Errorf("schedule_at must be within 14 days: got %s latest %s", t.Format("2006-01-02 15:04"), maxTime.Format("2006-01-02 15:04"))
-		}
-
-		scheduleTime = &t
+	scheduleTime, scheduleErr := validateScheduleAt(req.ScheduleAt)
+	if scheduleErr != nil {
+		err = scheduleErr
+		return result, err
 	}
 
 	content := xiaohongshu.PublishImageContent{
 		Title:        req.Title,
 		Content:      req.Content,
 		Tags:         req.Tags,
-		ImagePaths:   imagePaths,
+		ImagePaths:   stageResult.StagedImagePaths,
 		ScheduleTime: scheduleTime,
 		IsOriginal:   req.IsOriginal,
 		Visibility:   visibility,
 		Products:     req.Products,
 	}
 
-	if err := s.publishContent(ctx, content); err != nil {
-		logrus.WithError(err).WithField("title", content.Title).Error("publish content failed")
-		return nil, err
+	if err = s.publishContent(ctx, content); err != nil {
+		logrus.WithError(err).WithFields(logrus.Fields{
+			"task_id":    result.TaskID,
+			"batch_id":   result.BatchID,
+			"tenant_id":  result.TenantID,
+			"account_id": result.AccountID,
+			"title":      content.Title,
+		}).Error("publish content failed")
+		return result, err
 	}
 
-	return &PublishResponse{
-		Title:   req.Title,
-		Content: req.Content,
-		Images:  len(imagePaths),
-		Status:  "publish completed",
-	}, nil
+	result.OK = true
+	result.Status = "succeeded"
+	return result, nil
 }
 
-func (s *XiaohongshuService) processImages(images []string) ([]string, error) {
+func (s *XiaohongshuService) StageImages(images []string) (*StageImagesResponse, error) {
+	if len(images) == 0 {
+		return nil, newAppError("IMAGES_REQUIRED", "images are required", 400, false, nil, nil)
+	}
+
 	processor := downloader.NewImageProcessor()
-	return processor.ProcessImages(images)
+	stagedPaths, err := processor.ProcessImages(images)
+	if err != nil {
+		return nil, newAppError("IMAGE_STAGING_FAILED", "failed to stage images for publish", 400, false, err, map[string]any{
+			"images": images,
+		})
+	}
+
+	return &StageImagesResponse{
+		OK:               true,
+		ImagePaths:       copyStrings(images),
+		StagedImagePaths: copyStrings(stagedPaths),
+		Count:            len(stagedPaths),
+	}, nil
 }
 
 func (s *XiaohongshuService) publishContent(ctx context.Context, content xiaohongshu.PublishImageContent) error {
@@ -280,41 +341,44 @@ func (s *XiaohongshuService) publishContent(ctx context.Context, content xiaohon
 	})
 }
 
-func (s *XiaohongshuService) PublishVideo(ctx context.Context, req *PublishVideoRequest) (*PublishVideoResponse, error) {
+func (s *XiaohongshuService) PublishVideo(ctx context.Context, req *PublishVideoRequest) (result *PublishExecutionResult, err error) {
+	scope := AccountScopeFromContext(ctx)
+	meta := operationMetadataFromContext(ctx)
+	startedAt := time.Now().UTC()
+
+	result = newPublishExecutionResult(OperationPublishVideo, scope, req.Title, req.Content, firstNonEmpty(req.TaskID, meta.TaskID), firstNonEmpty(req.BatchID, meta.BatchID))
+	result.VideoPath = req.Video
+	result.PublishStartAt = formatTime(startedAt)
+
+	defer func() {
+		s.finishPublishExecution(scope, startedAt, result, err)
+	}()
+
 	if xhsutil.CalcTitleLength(req.Title) > 20 {
-		return nil, fmt.Errorf("title length exceeds limit")
+		err = newAppError("TITLE_TOO_LONG", "title length exceeds limit", 400, false, nil, nil)
+		return result, err
 	}
 
-	visibility, err := normalizeVisibility(req.Visibility)
-	if err != nil {
-		return nil, err
+	visibility, visibilityErr := normalizeVisibility(req.Visibility)
+	if visibilityErr != nil {
+		err = newAppError("INVALID_VISIBILITY", "unsupported visibility", 400, false, visibilityErr, nil)
+		return result, err
 	}
 	if req.Video == "" {
-		return nil, fmt.Errorf("video path is required")
+		err = newAppError("VIDEO_REQUIRED", "video path is required", 400, false, nil, nil)
+		return result, err
 	}
-	if _, err := os.Stat(req.Video); err != nil {
-		return nil, fmt.Errorf("video file inaccessible: %w", err)
+	if _, statErr := os.Stat(req.Video); statErr != nil {
+		err = newAppError("VIDEO_INACCESSIBLE", "video file inaccessible", 400, false, statErr, map[string]any{
+			"video_path": req.Video,
+		})
+		return result, err
 	}
 
-	var scheduleTime *time.Time
-	if req.ScheduleAt != "" {
-		t, err := time.Parse(time.RFC3339, req.ScheduleAt)
-		if err != nil {
-			return nil, fmt.Errorf("invalid schedule_at format: %w", err)
-		}
-
-		now := time.Now()
-		minTime := now.Add(1 * time.Hour)
-		maxTime := now.Add(14 * 24 * time.Hour)
-
-		if t.Before(minTime) {
-			return nil, fmt.Errorf("schedule_at must be at least 1 hour later: got %s earliest %s", t.Format("2006-01-02 15:04"), minTime.Format("2006-01-02 15:04"))
-		}
-		if t.After(maxTime) {
-			return nil, fmt.Errorf("schedule_at must be within 14 days: got %s latest %s", t.Format("2006-01-02 15:04"), maxTime.Format("2006-01-02 15:04"))
-		}
-
-		scheduleTime = &t
+	scheduleTime, scheduleErr := validateScheduleAt(req.ScheduleAt)
+	if scheduleErr != nil {
+		err = scheduleErr
+		return result, err
 	}
 
 	content := xiaohongshu.PublishVideoContent{
@@ -327,16 +391,13 @@ func (s *XiaohongshuService) PublishVideo(ctx context.Context, req *PublishVideo
 		Products:     req.Products,
 	}
 
-	if err := s.publishVideo(ctx, content); err != nil {
-		return nil, err
+	if err = s.publishVideo(ctx, content); err != nil {
+		return result, err
 	}
 
-	return &PublishVideoResponse{
-		Title:   req.Title,
-		Content: req.Content,
-		Video:   req.Video,
-		Status:  "publish completed",
-	}, nil
+	result.OK = true
+	result.Status = "succeeded"
+	return result, nil
 }
 
 func (s *XiaohongshuService) publishVideo(ctx context.Context, content xiaohongshu.PublishVideoContent) error {
@@ -524,13 +585,38 @@ func (s *XiaohongshuService) withAccountPage(ctx context.Context, fn func(*rod.P
 	if err != nil {
 		return err
 	}
-	defer session.Release()
+	releaseBrowserSlot, err := s.browserGuard.Acquire(ctx)
+	if err != nil {
+		session.Release()
+		return err
+	}
 
 	b := newBrowserForSession(session)
-	defer b.Close()
+	s.metrics.BrowserSessionStarted()
 
 	page := b.NewPage()
-	defer page.Close()
+	var closeOnce sync.Once
+	closeResources := func() {
+		closeOnce.Do(func() {
+			_ = page.Close()
+			b.Close()
+			session.Release()
+			releaseBrowserSlot()
+			s.metrics.BrowserSessionEnded()
+		})
+	}
+	defer closeResources()
+
+	done := make(chan struct{})
+	defer close(done)
+
+	go func() {
+		select {
+		case <-ctx.Done():
+			closeResources()
+		case <-done:
+		}
+	}()
 
 	return fn(page, session)
 }
@@ -566,6 +652,126 @@ func accountLabelFromSession(session *AccountSession) string {
 		return ""
 	}
 	return session.TenantID + "/" + session.AccountID
+}
+
+func newPublishExecutionResult(op OperationName, scope AccountScope, title, content, taskID, batchID string) *PublishExecutionResult {
+	return &PublishExecutionResult{
+		Mode:      "sync",
+		Operation: string(op),
+		TaskID:    ensureTaskID(taskID, "pub"),
+		BatchID:   batchID,
+		TenantID:  scope.TenantID,
+		AccountID: scope.AccountID,
+		Title:     title,
+		Content:   content,
+		Status:    "running",
+	}
+}
+
+func (s *XiaohongshuService) finishPublishExecution(scope AccountScope, startedAt time.Time, result *PublishExecutionResult, err error) {
+	if result == nil {
+		return
+	}
+
+	duration := time.Since(startedAt)
+	result.DurationMs = duration.Milliseconds()
+	result.PublishEndAt = formatTime(startedAt.Add(duration))
+
+	appErr := classifyError(err)
+	if err == nil {
+		result.OK = true
+		if result.Status == "" || result.Status == "running" {
+			result.Status = "succeeded"
+		}
+		s.accountManager.RecordPublishResult(scope, nil)
+		s.metrics.RecordPublish(startedAt, duration, true)
+		logrus.WithFields(logrus.Fields{
+			"operation":          result.Operation,
+			"task_id":            result.TaskID,
+			"batch_id":           result.BatchID,
+			"tenant_id":          result.TenantID,
+			"account_id":         result.AccountID,
+			"title":              result.Title,
+			"duration_ms":        result.DurationMs,
+			"staged_image_paths": result.StagedImagePaths,
+			"video_path":         result.VideoPath,
+			"publish_start_at":   result.PublishStartAt,
+			"publish_end_at":     result.PublishEndAt,
+		}).Info("publish operation completed")
+		return
+	}
+
+	result.OK = false
+	result.Status = "failed"
+	result.ErrorCode = appErr.Code
+	result.ErrorMessage = appErr.Error()
+	result.Retryable = appErr.Retryable
+	s.accountManager.RecordPublishResult(scope, appErr)
+	s.metrics.RecordPublish(startedAt, duration, false)
+	logrus.WithError(err).WithFields(logrus.Fields{
+		"operation":        result.Operation,
+		"task_id":          result.TaskID,
+		"batch_id":         result.BatchID,
+		"tenant_id":        result.TenantID,
+		"account_id":       result.AccountID,
+		"title":            result.Title,
+		"duration_ms":      result.DurationMs,
+		"error_code":       result.ErrorCode,
+		"retryable":        result.Retryable,
+		"publish_start_at": result.PublishStartAt,
+		"publish_end_at":   result.PublishEndAt,
+	}).Warn("publish operation failed")
+}
+
+func validateScheduleAt(raw string) (*time.Time, error) {
+	if raw == "" {
+		return nil, nil
+	}
+
+	t, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return nil, newAppError("INVALID_SCHEDULE_AT", "invalid schedule_at format", 400, false, err, nil)
+	}
+
+	now := time.Now()
+	minTime := now.Add(1 * time.Hour)
+	maxTime := now.Add(14 * 24 * time.Hour)
+
+	if t.Before(minTime) {
+		return nil, newAppError("SCHEDULE_TOO_SOON", "schedule_at must be at least 1 hour later", 400, false, nil, map[string]any{
+			"schedule_at": raw,
+			"earliest":    minTime.Format(time.RFC3339),
+		})
+	}
+	if t.After(maxTime) {
+		return nil, newAppError("SCHEDULE_TOO_LATE", "schedule_at must be within 14 days", 400, false, nil, map[string]any{
+			"schedule_at": raw,
+			"latest":      maxTime.Format(time.RFC3339),
+		})
+	}
+
+	return &t, nil
+}
+
+func ensureTaskID(taskID, prefix string) string {
+	if taskID != "" {
+		return taskID
+	}
+	return fmt.Sprintf("%s_%d", prefix, time.Now().UnixNano())
+}
+
+func copyStrings(items []string) []string {
+	if len(items) == 0 {
+		return nil
+	}
+	return append([]string(nil), items...)
+}
+
+func firstString(items []string) string {
+	if len(items) == 0 {
+		return ""
+	}
+	return items[0]
 }
 
 func normalizeVisibility(input string) (string, error) {

@@ -12,9 +12,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sirupsen/logrus"
 	"github.com/hekaixin66-sketch/xiaohongshuritter/configs"
 	"github.com/hekaixin66-sketch/xiaohongshuritter/cookies"
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -24,6 +24,8 @@ const (
 	defaultGlobalConcurrency   = 8
 	defaultPerAccountSemaphore = 2
 	defaultAcquireTimeout      = 120 * time.Second
+	defaultCooldownFailures    = 3
+	defaultCooldownDuration    = 10 * time.Minute
 )
 
 type EnterpriseAccountConfig struct {
@@ -52,18 +54,28 @@ type EnterpriseProfileConfig struct {
 }
 
 type AccountInfo struct {
-	TenantID        string `json:"tenant_id"`
-	TenantName      string `json:"tenant_name,omitempty"`
-	AccountID       string `json:"account_id"`
-	AccountName     string `json:"account_name,omitempty"`
-	DefaultTenant   bool   `json:"default_tenant"`
-	DefaultAccount  bool   `json:"default_account"`
-	CookiePath      string `json:"cookie_path"`
-	MaxConcurrency  int    `json:"max_concurrency"`
-	CurrentInFlight int    `json:"current_in_flight"`
-	Headless        bool   `json:"headless"`
-	BrowserBin      string `json:"browser_bin,omitempty"`
-	Proxy           string `json:"proxy,omitempty"`
+	TenantID            string `json:"tenant_id"`
+	TenantName          string `json:"tenant_name,omitempty"`
+	AccountID           string `json:"account_id"`
+	AccountName         string `json:"account_name,omitempty"`
+	DefaultTenant       bool   `json:"default_tenant"`
+	DefaultAccount      bool   `json:"default_account"`
+	CookiePath          string `json:"cookie_path"`
+	MaxConcurrency      int    `json:"max_concurrency"`
+	CurrentInFlight     int    `json:"current_in_flight"`
+	Headless            bool   `json:"headless"`
+	BrowserBin          string `json:"browser_bin,omitempty"`
+	Proxy               string `json:"proxy,omitempty"`
+	LastSuccessAt       string `json:"last_success_at,omitempty"`
+	LastErrorAt         string `json:"last_error_at,omitempty"`
+	LastErrorCode       string `json:"last_error_code,omitempty"`
+	LastErrorMessage    string `json:"last_error_message,omitempty"`
+	ConsecutiveFailures int    `json:"consecutive_failures,omitempty"`
+	CooldownUntil       string `json:"cooldown_until,omitempty"`
+	QueueDepth          int    `json:"queue_depth,omitempty"`
+	QueueCapacity       int    `json:"queue_capacity,omitempty"`
+	ActiveJobs          int    `json:"active_jobs,omitempty"`
+	QueueWorkers        int    `json:"queue_workers,omitempty"`
 }
 
 type ResolvedAccount struct {
@@ -81,6 +93,14 @@ type ResolvedAccount struct {
 type accountRuntime struct {
 	resolved ResolvedAccount
 	sem      chan struct{}
+	mu       sync.Mutex
+
+	lastSuccessAt       time.Time
+	lastErrorAt         time.Time
+	lastErrorCode       string
+	lastErrorMessage    string
+	consecutiveFailures int
+	cooldownUntil       time.Time
 }
 
 type AccountManager struct {
@@ -89,6 +109,8 @@ type AccountManager struct {
 	defaultAccount  string
 	globalSem       chan struct{}
 	acquireTimeout  time.Duration
+	cooldownAfter   int
+	cooldownPeriod  time.Duration
 
 	tenantDefaults map[string]string
 	runtimes       map[string]*accountRuntime
@@ -121,6 +143,8 @@ func NewAccountManagerFromEnv() (*AccountManager, error) {
 	defaultGlobal := parsePositiveIntEnv("XHS_MAX_CONCURRENCY", defaultGlobalConcurrency)
 	defaultPerAccount := parsePositiveIntEnv("XHS_ACCOUNT_MAX_CONCURRENCY", defaultPerAccountSemaphore)
 	acquireTimeout := parsePositiveDurationEnv("XHS_ACQUIRE_TIMEOUT", defaultAcquireTimeout)
+	cooldownAfter := parsePositiveIntEnv("XHS_ACCOUNT_COOLDOWN_FAILURES", defaultCooldownFailures)
+	cooldownDuration := parsePositiveDurationEnv("XHS_ACCOUNT_COOLDOWN_DURATION", defaultCooldownDuration)
 
 	cfg, err := loadEnterpriseConfig(configPath, explicitConfigPath, defaultGlobal, defaultPerAccount)
 	if err != nil {
@@ -135,6 +159,8 @@ func NewAccountManagerFromEnv() (*AccountManager, error) {
 		return nil, err
 	}
 	manager.acquireTimeout = acquireTimeout
+	manager.cooldownAfter = cooldownAfter
+	manager.cooldownPeriod = cooldownDuration
 
 	logrus.WithFields(logrus.Fields{
 		"config_path":          configPath,
@@ -143,6 +169,8 @@ func NewAccountManagerFromEnv() (*AccountManager, error) {
 		"global_concurrency":   cap(manager.globalSem),
 		"account_concurrency":  defaultPerAccount,
 		"account_runtime_size": len(manager.runtimes),
+		"cooldown_after":       manager.cooldownAfter,
+		"cooldown_period":      manager.cooldownPeriod.String(),
 	}).Info("account manager initialized")
 
 	return manager, nil
@@ -183,6 +211,9 @@ func (m *AccountManager) Acquire(ctx context.Context, scope AccountScope) (*Acco
 	if !ok {
 		return nil, fmt.Errorf("runtime missing for tenant=%q account=%q", resolved.TenantID, resolved.AccountID)
 	}
+	if err := runtime.checkCooldown(); err != nil {
+		return nil, err
+	}
 
 	acquireCtx := ctx
 	var cancel context.CancelFunc
@@ -215,22 +246,29 @@ func (m *AccountManager) ListAccounts() []AccountInfo {
 	result := make([]AccountInfo, 0, len(m.runtimes))
 	for _, runtime := range m.runtimes {
 		resolved := runtime.resolved
+		stats := runtime.snapshot()
 		isDefaultTenant := resolved.TenantID == m.defaultTenantID
 		isDefaultAccount := isDefaultTenant && resolved.AccountID == m.defaultAccount
 
 		result = append(result, AccountInfo{
-			TenantID:        resolved.TenantID,
-			TenantName:      resolved.TenantName,
-			AccountID:       resolved.AccountID,
-			AccountName:     resolved.AccountName,
-			DefaultTenant:   isDefaultTenant,
-			DefaultAccount:  isDefaultAccount,
-			CookiePath:      resolved.CookiePath,
-			MaxConcurrency:  resolved.MaxConcurrency,
-			CurrentInFlight: len(runtime.sem),
-			Headless:        resolved.Headless,
-			BrowserBin:      resolved.BrowserBin,
-			Proxy:           maskCredentials(resolved.Proxy),
+			TenantID:            resolved.TenantID,
+			TenantName:          resolved.TenantName,
+			AccountID:           resolved.AccountID,
+			AccountName:         resolved.AccountName,
+			DefaultTenant:       isDefaultTenant,
+			DefaultAccount:      isDefaultAccount,
+			CookiePath:          resolved.CookiePath,
+			MaxConcurrency:      resolved.MaxConcurrency,
+			CurrentInFlight:     len(runtime.sem),
+			Headless:            resolved.Headless,
+			BrowserBin:          resolved.BrowserBin,
+			Proxy:               maskCredentials(resolved.Proxy),
+			LastSuccessAt:       formatTime(stats.LastSuccessAt),
+			LastErrorAt:         formatTime(stats.LastErrorAt),
+			LastErrorCode:       stats.LastErrorCode,
+			LastErrorMessage:    stats.LastErrorMessage,
+			ConsecutiveFailures: stats.ConsecutiveFailures,
+			CooldownUntil:       formatTime(stats.CooldownUntil),
 		})
 	}
 
@@ -246,6 +284,59 @@ func (m *AccountManager) ListAccounts() []AccountInfo {
 
 func (m *AccountManager) ConfigPath() string {
 	return m.configPath
+}
+
+func (m *AccountManager) GlobalInFlight() int {
+	return len(m.globalSem)
+}
+
+func (m *AccountManager) GlobalConcurrencyLimit() int {
+	if m == nil || m.globalSem == nil {
+		return 0
+	}
+	return cap(m.globalSem)
+}
+
+func (m *AccountManager) RecordPublishResult(scope AccountScope, appErr *AppError) {
+	resolved, err := m.Resolve(scope)
+	if err != nil {
+		return
+	}
+	runtime, ok := m.runtimes[accountKey(resolved.TenantID, resolved.AccountID)]
+	if !ok {
+		return
+	}
+
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+
+	now := time.Now().UTC()
+	if appErr == nil {
+		runtime.lastSuccessAt = now
+		runtime.lastErrorCode = ""
+		runtime.lastErrorMessage = ""
+		runtime.consecutiveFailures = 0
+		runtime.cooldownUntil = time.Time{}
+		return
+	}
+
+	runtime.lastErrorAt = now
+	runtime.lastErrorCode = appErr.Code
+	runtime.lastErrorMessage = appErr.Error()
+	if !shouldCountTowardsCooldown(appErr) {
+		return
+	}
+
+	runtime.consecutiveFailures++
+	if m.cooldownAfter > 0 && runtime.consecutiveFailures >= m.cooldownAfter && m.cooldownPeriod > 0 {
+		runtime.cooldownUntil = now.Add(m.cooldownPeriod)
+		logrus.WithFields(logrus.Fields{
+			"tenant_id":      resolved.TenantID,
+			"account_id":     resolved.AccountID,
+			"cooldown_until": runtime.cooldownUntil.Format(time.RFC3339),
+			"error_code":     appErr.Code,
+		}).Warn("account entered cooldown after repeated failures")
+	}
 }
 
 func buildAccountManager(path string, cfg EnterpriseAccountConfig, defaultPerAccount int) (*AccountManager, error) {
@@ -469,4 +560,64 @@ func maskCredentials(proxy string) string {
 		return proxy
 	}
 	return proxy[:scheme+3] + "***:***@" + proxy[at+1:]
+}
+
+func (r *accountRuntime) checkCooldown() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.cooldownUntil.IsZero() {
+		return nil
+	}
+	if time.Now().UTC().After(r.cooldownUntil) {
+		r.cooldownUntil = time.Time{}
+		r.consecutiveFailures = 0
+		return nil
+	}
+
+	return newAppError(
+		"ACCOUNT_COOLDOWN",
+		"account is cooling down",
+		429,
+		true,
+		nil,
+		map[string]any{
+			"tenant_id":      r.resolved.TenantID,
+			"account_id":     r.resolved.AccountID,
+			"cooldown_until": r.cooldownUntil.Format(time.RFC3339),
+		},
+	)
+}
+
+func shouldCountTowardsCooldown(err *AppError) bool {
+	if err == nil {
+		return false
+	}
+	if !err.Retryable {
+		return false
+	}
+	return err.StatusCode >= 429 || err.StatusCode >= 500
+}
+
+type accountRuntimeSnapshot struct {
+	LastSuccessAt       time.Time
+	LastErrorAt         time.Time
+	LastErrorCode       string
+	LastErrorMessage    string
+	ConsecutiveFailures int
+	CooldownUntil       time.Time
+}
+
+func (r *accountRuntime) snapshot() accountRuntimeSnapshot {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return accountRuntimeSnapshot{
+		LastSuccessAt:       r.lastSuccessAt,
+		LastErrorAt:         r.lastErrorAt,
+		LastErrorCode:       r.lastErrorCode,
+		LastErrorMessage:    r.lastErrorMessage,
+		ConsecutiveFailures: r.consecutiveFailures,
+		CooldownUntil:       r.cooldownUntil,
+	}
 }

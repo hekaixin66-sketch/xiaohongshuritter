@@ -38,6 +38,23 @@ OpenClaw 每次业务调用都要显式传入：
 
 先调用 `list_accounts`，确认目标租户和账号是否存在。
 
+如果是多账号批量任务，推荐先调用：
+
+- `recommend_publish_accounts`
+
+或者 HTTP：
+
+- `GET /api/v1/scheduler/accounts`
+- `POST /api/v1/scheduler/accounts`
+
+优先选择：
+
+- `available=true`
+- `queue_depth` 更低
+- `active_jobs` 更低
+- `cooldown_until` 为空
+- `cookie_present=true`
+
 ### 第二步：确认登录状态
 
 调用 `check_login_status`，并带上 `tenant_id` 与 `account_id`。
@@ -62,6 +79,20 @@ OpenClaw 每次业务调用都要显式传入：
 - `reply_comment_in_feed`
 - `like_feed`
 - `favorite_feed`
+
+对于发布类任务，推荐优先使用异步模式：
+
+- `submit_publish_content_async`
+- `submit_publish_video_async`
+- `get_publish_job_status`
+
+或者 HTTP：
+
+- `POST /api/v1/publish_async`
+- `POST /api/v1/publish_video_async`
+- `GET /api/v1/publish/jobs/:job_id`
+
+这样 OpenClaw agent 不需要长时间阻塞等待单次发布完成。
 
 ## 5. OpenClaw 示例参数
 
@@ -117,7 +148,16 @@ OpenClaw 每次业务调用都要显式传入：
 
 - 每 5 分钟检查一次 `/health`
 - 每 30 分钟检查一次 `/api/v1/accounts`
+- 每批任务前检查一次 `/api/v1/scheduler/accounts`
 - 发布失败时先确认账号登录态和并发占用
+
+建议重点关注：
+
+- `queue_depth`
+- `active_jobs`
+- `cooldown_until`
+- `global_in_flight`
+- `job_runtime.outstanding_jobs`
 
 ## 8. 常见故障处理
 
@@ -162,5 +202,7 @@ docker compose logs --tail=300 > xiaohongshuritter-browser.log
 
 1. 使用本包的 `scripts/install.sh` 安装
 2. 调用前先执行 `list_accounts`
-3. 每次业务调用显式传入 `tenant_id` 和 `account_id`
-4. 登录失败时按手册执行二维码登录流程，不要跳步
+3. 多账号调度前优先执行 `recommend_publish_accounts`
+4. 发布任务优先走异步接口或异步 MCP 工具
+5. 每次业务调用显式传入 `tenant_id` 和 `account_id`
+6. 登录失败时按手册执行二维码登录流程，不要跳步
