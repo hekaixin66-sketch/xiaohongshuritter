@@ -9,13 +9,13 @@ import (
 	"time"
 
 	"github.com/go-rod/rod"
-	"github.com/sirupsen/logrus"
-	"github.com/xpzouying/headless_browser"
 	"github.com/hekaixin66-sketch/xiaohongshuritter/browser"
 	"github.com/hekaixin66-sketch/xiaohongshuritter/cookies"
 	"github.com/hekaixin66-sketch/xiaohongshuritter/pkg/downloader"
 	"github.com/hekaixin66-sketch/xiaohongshuritter/pkg/xhsutil"
 	"github.com/hekaixin66-sketch/xiaohongshuritter/xiaohongshu"
+	"github.com/sirupsen/logrus"
+	"github.com/xpzouying/headless_browser"
 )
 
 // XiaohongshuService encapsulates business operations.
@@ -58,6 +58,9 @@ type PublishRequest struct {
 	IsOriginal bool     `json:"is_original,omitempty"`
 	Visibility string   `json:"visibility,omitempty"`
 	Products   []string `json:"products,omitempty"`
+	TaskID     string   `json:"task_id,omitempty"`
+	BatchID    string   `json:"batch_id,omitempty"`
+	Mode       string   `json:"mode,omitempty"`
 }
 
 // LoginStatusResponse login status payload.
@@ -92,6 +95,9 @@ type PublishVideoRequest struct {
 	ScheduleAt string   `json:"schedule_at,omitempty"`
 	Visibility string   `json:"visibility,omitempty"`
 	Products   []string `json:"products,omitempty"`
+	TaskID     string   `json:"task_id,omitempty"`
+	BatchID    string   `json:"batch_id,omitempty"`
+	Mode       string   `json:"mode,omitempty"`
 }
 
 // PublishVideoResponse publish response payload.
@@ -205,26 +211,83 @@ func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeRe
 	}, nil
 }
 
-func (s *XiaohongshuService) PublishContent(ctx context.Context, req *PublishRequest) (*PublishResponse, error) {
+func (s *XiaohongshuService) PublishContent(ctx context.Context, req *PublishRequest) (*PublishExecutionResult, error) {
+	startedAt := time.Now().UTC()
+	scope := AccountScopeFromContext(ctx)
+	result := &PublishExecutionResult{
+		Mode:           firstNonEmpty(req.Mode, string(PublishModeSync)),
+		TaskID:         ensureTaskID(req.TaskID, "pub"),
+		BatchID:        req.BatchID,
+		TenantID:       scope.TenantID,
+		AccountID:      scope.AccountID,
+		Title:          req.Title,
+		Content:        req.Content,
+		Status:         "running",
+		PublishStartAt: formatRFC3339(startedAt),
+		ProductBindingResult: ProductBindingResult{
+			ProductsRequested: copyStrings(req.Products),
+		},
+	}
+
+	finalize := func(err error) (*PublishExecutionResult, error) {
+		finishedAt := time.Now().UTC()
+		result.PublishEndAt = formatRFC3339(finishedAt)
+		result.DurationMs = finishedAt.Sub(startedAt).Milliseconds()
+		if err != nil {
+			if result.ErrorCode == "" {
+				result.ErrorCode = "PUBLISH_FAILED"
+			}
+			if result.ErrorMessage == "" {
+				result.ErrorMessage = err.Error()
+			}
+			result.OK = false
+			if result.Status == "running" {
+				result.Status = "failed"
+			}
+			return result, err
+		}
+		result.OK = true
+		if result.Status == "running" {
+			result.Status = "succeeded"
+		}
+		return result, nil
+	}
+
 	if xhsutil.CalcTitleLength(req.Title) > 20 {
-		return nil, fmt.Errorf("title length exceeds limit")
+		result.ErrorCode = "TITLE_TOO_LONG"
+		return finalize(fmt.Errorf("title length exceeds limit"))
 	}
 
 	visibility, err := normalizeVisibility(req.Visibility)
 	if err != nil {
-		return nil, err
+		result.ErrorCode = "INVALID_VISIBILITY"
+		return finalize(err)
 	}
 
-	imagePaths, err := s.processImages(req.Images)
-	if err != nil {
-		return nil, err
+	beforeSnapshot, snapshotErr := s.captureMyFeedSnapshot(ctx)
+	if snapshotErr != nil {
+		beforeSnapshot = publishFeedSnapshot{}
+		result.BackfillStatus = string(PublishBackfillPending)
+		result.BackfillReason = "failed to capture pre-publish snapshot: " + snapshotErr.Error()
 	}
+
+	imagePaths, cleanupResult, err := s.processImagesForPublish(req.Images)
+	if err != nil {
+		result.PublishCleanupResult = cleanupResult
+		result.ErrorCode = "IMAGE_PROCESS_FAILED"
+		return finalize(err)
+	}
+	defer func() {
+		cleanupResult = cleanupTempFiles(cleanupResult.Paths)
+		result.PublishCleanupResult = cleanupResult
+	}()
 
 	var scheduleTime *time.Time
 	if req.ScheduleAt != "" {
 		t, err := time.Parse(time.RFC3339, req.ScheduleAt)
 		if err != nil {
-			return nil, fmt.Errorf("invalid schedule_at format: %w", err)
+			result.ErrorCode = "INVALID_SCHEDULE_AT"
+			return finalize(fmt.Errorf("invalid schedule_at format: %w", err))
 		}
 
 		now := time.Now()
@@ -232,10 +295,12 @@ func (s *XiaohongshuService) PublishContent(ctx context.Context, req *PublishReq
 		maxTime := now.Add(14 * 24 * time.Hour)
 
 		if t.Before(minTime) {
-			return nil, fmt.Errorf("schedule_at must be at least 1 hour later: got %s earliest %s", t.Format("2006-01-02 15:04"), minTime.Format("2006-01-02 15:04"))
+			result.ErrorCode = "SCHEDULE_TOO_SOON"
+			return finalize(fmt.Errorf("schedule_at must be at least 1 hour later: got %s earliest %s", t.Format("2006-01-02 15:04"), minTime.Format("2006-01-02 15:04")))
 		}
 		if t.After(maxTime) {
-			return nil, fmt.Errorf("schedule_at must be within 14 days: got %s latest %s", t.Format("2006-01-02 15:04"), maxTime.Format("2006-01-02 15:04"))
+			result.ErrorCode = "SCHEDULE_TOO_LATE"
+			return finalize(fmt.Errorf("schedule_at must be within 14 days: got %s latest %s", t.Format("2006-01-02 15:04"), maxTime.Format("2006-01-02 15:04")))
 		}
 
 		scheduleTime = &t
@@ -252,17 +317,41 @@ func (s *XiaohongshuService) PublishContent(ctx context.Context, req *PublishReq
 		Products:     req.Products,
 	}
 
-	if err := s.publishContent(ctx, content); err != nil {
+	artifacts, err := s.publishContent(ctx, content)
+	if artifacts != nil {
+		result.ProductBindingResult = makeProductBindingResult(artifacts.ProductBind)
+	}
+	if err != nil {
 		logrus.WithError(err).WithField("title", content.Title).Error("publish content failed")
-		return nil, err
+		if result.ErrorCode == "" {
+			result.ErrorCode = "PUBLISH_FAILED"
+		}
+		return finalize(err)
 	}
 
-	return &PublishResponse{
-		Title:   req.Title,
-		Content: req.Content,
-		Images:  len(imagePaths),
-		Status:  "publish completed",
-	}, nil
+	result.Status = "succeeded"
+	if scheduleTime != nil {
+		result.BackfillStatus = string(PublishBackfillSkipped)
+		result.BackfillReason = "scheduled publish does not create an immediately visible note"
+		return finalize(nil)
+	}
+
+	feed, err := s.waitForPublishedFeed(ctx, beforeSnapshot, req.Title)
+	if err != nil {
+		logrus.WithError(err).WithField("title", req.Title).Warn("publish succeeded but entity backfill did not resolve")
+		result.BackfillStatus = string(PublishBackfillPending)
+		result.BackfillReason = err.Error()
+		return finalize(nil)
+	}
+
+	detail, detailErr := s.getFeedDetailInternal(ctx, feed.ID, feed.XsecToken)
+	if detailErr != nil {
+		logrus.WithError(detailErr).WithField("feed_id", feed.ID).Warn("publish entity found but detail fetch failed")
+	}
+	applyPublishEntity(result, feed, detail)
+	result.BackfillStatus = string(PublishBackfillResolved)
+
+	return finalize(nil)
 }
 
 func (s *XiaohongshuService) processImages(images []string) ([]string, error) {
@@ -270,37 +359,117 @@ func (s *XiaohongshuService) processImages(images []string) ([]string, error) {
 	return processor.ProcessImages(images)
 }
 
-func (s *XiaohongshuService) publishContent(ctx context.Context, content xiaohongshu.PublishImageContent) error {
-	return s.withAccountPage(ctx, func(page *rod.Page, _ *AccountSession) error {
+func (s *XiaohongshuService) processImagesForPublish(images []string) ([]string, PublishCleanupResult, error) {
+	localPaths, err := s.processImages(images)
+	if err != nil {
+		return nil, PublishCleanupResult{}, err
+	}
+
+	cleanupPaths := make([]string, 0, len(images))
+	for idx, image := range images {
+		if idx >= len(localPaths) {
+			break
+		}
+		if downloader.IsImageURL(image) {
+			cleanupPaths = append(cleanupPaths, localPaths[idx])
+		}
+	}
+
+	result := PublishCleanupResult{Status: "skipped"}
+	if len(cleanupPaths) > 0 {
+		result.Status = "pending"
+		result.Paths = cleanupPaths
+	}
+	return localPaths, result, nil
+}
+
+func (s *XiaohongshuService) publishContent(ctx context.Context, content xiaohongshu.PublishImageContent) (*xiaohongshu.PublishArtifacts, error) {
+	var artifacts *xiaohongshu.PublishArtifacts
+	err := s.withAccountPage(ctx, func(page *rod.Page, _ *AccountSession) error {
 		action, err := xiaohongshu.NewPublishImageAction(page)
 		if err != nil {
 			return err
 		}
-		return action.Publish(ctx, content)
+		artifacts, err = action.Publish(ctx, content)
+		return err
 	})
+	return artifacts, err
 }
 
-func (s *XiaohongshuService) PublishVideo(ctx context.Context, req *PublishVideoRequest) (*PublishVideoResponse, error) {
+func (s *XiaohongshuService) PublishVideo(ctx context.Context, req *PublishVideoRequest) (*PublishExecutionResult, error) {
+	startedAt := time.Now().UTC()
+	scope := AccountScopeFromContext(ctx)
+	result := &PublishExecutionResult{
+		Mode:           firstNonEmpty(req.Mode, string(PublishModeSync)),
+		TaskID:         ensureTaskID(req.TaskID, "pub"),
+		BatchID:        req.BatchID,
+		TenantID:       scope.TenantID,
+		AccountID:      scope.AccountID,
+		Title:          req.Title,
+		Content:        req.Content,
+		Status:         "running",
+		PublishStartAt: formatRFC3339(startedAt),
+		ProductBindingResult: ProductBindingResult{
+			ProductsRequested: copyStrings(req.Products),
+		},
+	}
+
+	finalize := func(err error) (*PublishExecutionResult, error) {
+		finishedAt := time.Now().UTC()
+		result.PublishEndAt = formatRFC3339(finishedAt)
+		result.DurationMs = finishedAt.Sub(startedAt).Milliseconds()
+		if err != nil {
+			if result.ErrorCode == "" {
+				result.ErrorCode = "PUBLISH_VIDEO_FAILED"
+			}
+			if result.ErrorMessage == "" {
+				result.ErrorMessage = err.Error()
+			}
+			result.OK = false
+			if result.Status == "running" {
+				result.Status = "failed"
+			}
+			return result, err
+		}
+		result.OK = true
+		if result.Status == "running" {
+			result.Status = "succeeded"
+		}
+		return result, nil
+	}
+
 	if xhsutil.CalcTitleLength(req.Title) > 20 {
-		return nil, fmt.Errorf("title length exceeds limit")
+		result.ErrorCode = "TITLE_TOO_LONG"
+		return finalize(fmt.Errorf("title length exceeds limit"))
 	}
 
 	visibility, err := normalizeVisibility(req.Visibility)
 	if err != nil {
-		return nil, err
+		result.ErrorCode = "INVALID_VISIBILITY"
+		return finalize(err)
 	}
 	if req.Video == "" {
-		return nil, fmt.Errorf("video path is required")
+		result.ErrorCode = "VIDEO_REQUIRED"
+		return finalize(fmt.Errorf("video path is required"))
 	}
 	if _, err := os.Stat(req.Video); err != nil {
-		return nil, fmt.Errorf("video file inaccessible: %w", err)
+		result.ErrorCode = "VIDEO_INACCESSIBLE"
+		return finalize(fmt.Errorf("video file inaccessible: %w", err))
+	}
+
+	beforeSnapshot, snapshotErr := s.captureMyFeedSnapshot(ctx)
+	if snapshotErr != nil {
+		beforeSnapshot = publishFeedSnapshot{}
+		result.BackfillStatus = string(PublishBackfillPending)
+		result.BackfillReason = "failed to capture pre-publish snapshot: " + snapshotErr.Error()
 	}
 
 	var scheduleTime *time.Time
 	if req.ScheduleAt != "" {
 		t, err := time.Parse(time.RFC3339, req.ScheduleAt)
 		if err != nil {
-			return nil, fmt.Errorf("invalid schedule_at format: %w", err)
+			result.ErrorCode = "INVALID_SCHEDULE_AT"
+			return finalize(fmt.Errorf("invalid schedule_at format: %w", err))
 		}
 
 		now := time.Now()
@@ -308,10 +477,12 @@ func (s *XiaohongshuService) PublishVideo(ctx context.Context, req *PublishVideo
 		maxTime := now.Add(14 * 24 * time.Hour)
 
 		if t.Before(minTime) {
-			return nil, fmt.Errorf("schedule_at must be at least 1 hour later: got %s earliest %s", t.Format("2006-01-02 15:04"), minTime.Format("2006-01-02 15:04"))
+			result.ErrorCode = "SCHEDULE_TOO_SOON"
+			return finalize(fmt.Errorf("schedule_at must be at least 1 hour later: got %s earliest %s", t.Format("2006-01-02 15:04"), minTime.Format("2006-01-02 15:04")))
 		}
 		if t.After(maxTime) {
-			return nil, fmt.Errorf("schedule_at must be within 14 days: got %s latest %s", t.Format("2006-01-02 15:04"), maxTime.Format("2006-01-02 15:04"))
+			result.ErrorCode = "SCHEDULE_TOO_LATE"
+			return finalize(fmt.Errorf("schedule_at must be within 14 days: got %s latest %s", t.Format("2006-01-02 15:04"), maxTime.Format("2006-01-02 15:04")))
 		}
 
 		scheduleTime = &t
@@ -327,26 +498,50 @@ func (s *XiaohongshuService) PublishVideo(ctx context.Context, req *PublishVideo
 		Products:     req.Products,
 	}
 
-	if err := s.publishVideo(ctx, content); err != nil {
-		return nil, err
+	artifacts, err := s.publishVideo(ctx, content)
+	if artifacts != nil {
+		result.ProductBindingResult = makeProductBindingResult(artifacts.ProductBind)
+	}
+	if err != nil {
+		return finalize(err)
 	}
 
-	return &PublishVideoResponse{
-		Title:   req.Title,
-		Content: req.Content,
-		Video:   req.Video,
-		Status:  "publish completed",
-	}, nil
+	result.Status = "succeeded"
+	if scheduleTime != nil {
+		result.BackfillStatus = string(PublishBackfillSkipped)
+		result.BackfillReason = "scheduled publish does not create an immediately visible note"
+		return finalize(nil)
+	}
+
+	feed, err := s.waitForPublishedFeed(ctx, beforeSnapshot, req.Title)
+	if err != nil {
+		logrus.WithError(err).WithField("title", req.Title).Warn("video publish succeeded but entity backfill did not resolve")
+		result.BackfillStatus = string(PublishBackfillPending)
+		result.BackfillReason = err.Error()
+		return finalize(nil)
+	}
+
+	detail, detailErr := s.getFeedDetailInternal(ctx, feed.ID, feed.XsecToken)
+	if detailErr != nil {
+		logrus.WithError(detailErr).WithField("feed_id", feed.ID).Warn("video publish entity found but detail fetch failed")
+	}
+	applyPublishEntity(result, feed, detail)
+	result.BackfillStatus = string(PublishBackfillResolved)
+
+	return finalize(nil)
 }
 
-func (s *XiaohongshuService) publishVideo(ctx context.Context, content xiaohongshu.PublishVideoContent) error {
-	return s.withAccountPage(ctx, func(page *rod.Page, _ *AccountSession) error {
+func (s *XiaohongshuService) publishVideo(ctx context.Context, content xiaohongshu.PublishVideoContent) (*xiaohongshu.PublishArtifacts, error) {
+	var artifacts *xiaohongshu.PublishArtifacts
+	err := s.withAccountPage(ctx, func(page *rod.Page, _ *AccountSession) error {
 		action, err := xiaohongshu.NewPublishVideoAction(page)
 		if err != nil {
 			return err
 		}
-		return action.PublishVideo(ctx, content)
+		artifacts, err = action.PublishVideo(ctx, content)
+		return err
 	})
+	return artifacts, err
 }
 
 func (s *XiaohongshuService) ListFeeds(ctx context.Context) (*FeedsListResponse, error) {
@@ -514,6 +709,65 @@ func (s *XiaohongshuService) GetMyProfile(ctx context.Context) (*UserProfileResp
 	}, nil
 }
 
+func (s *XiaohongshuService) ListRecentPublishedNotes(ctx context.Context, req *RecentPublishedNotesRequest) (*RecentPublishedNotesResponse, error) {
+	profile, err := s.GetMyProfile(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+
+	var sinceTime time.Time
+	if strings.TrimSpace(req.SinceTime) != "" {
+		sinceTime, err = time.Parse(time.RFC3339, req.SinceTime)
+		if err != nil {
+			return nil, fmt.Errorf("invalid since_time format: %w", err)
+		}
+	}
+
+	notes := make([]RecentPublishedNote, 0, limit)
+	keyword := strings.TrimSpace(req.TitleKeyword)
+	for _, feed := range profile.Feeds {
+		if len(notes) >= limit {
+			break
+		}
+		title := strings.TrimSpace(feed.NoteCard.DisplayTitle)
+		if keyword != "" && !strings.Contains(title, keyword) {
+			continue
+		}
+
+		note := RecentPublishedNote{
+			NoteID:    feed.ID,
+			NoteURL:   buildFeedNoteURL(feed.ID, feed.XsecToken),
+			FeedID:    feed.ID,
+			XsecToken: feed.XsecToken,
+			Title:     title,
+		}
+
+		detail, detailErr := s.getFeedDetailInternal(ctx, feed.ID, feed.XsecToken)
+		if detailErr == nil && detail != nil {
+			if detail.Note.NoteID != "" {
+				note.NoteID = detail.Note.NoteID
+			}
+			note.PublishTime = unixToRFC3339(detail.Note.Time)
+		}
+
+		if !sinceTime.IsZero() && note.PublishTime != "" {
+			publishedAt, parseErr := time.Parse(time.RFC3339, note.PublishTime)
+			if parseErr == nil && publishedAt.Before(sinceTime) {
+				continue
+			}
+		}
+
+		notes = append(notes, note)
+	}
+
+	return &RecentPublishedNotesResponse{Notes: notes, Count: len(notes)}, nil
+}
+
 func (s *XiaohongshuService) acquireSession(ctx context.Context) (*AccountSession, error) {
 	scope := AccountScopeFromContext(ctx)
 	return s.accountManager.Acquire(ctx, scope)
@@ -566,6 +820,42 @@ func accountLabelFromSession(session *AccountSession) string {
 		return ""
 	}
 	return session.TenantID + "/" + session.AccountID
+}
+
+func cleanupTempFiles(paths []string) PublishCleanupResult {
+	result := PublishCleanupResult{
+		Status: "skipped",
+		Paths:  copyStrings(paths),
+	}
+	if len(paths) == 0 {
+		return result
+	}
+
+	result.Status = "completed"
+	for _, path := range paths {
+		if strings.TrimSpace(path) == "" {
+			continue
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			result.Status = "partial"
+			result.Errors = append(result.Errors, err.Error())
+		}
+	}
+	if len(result.Errors) == len(paths) {
+		result.Status = "failed"
+	}
+	return result
+}
+
+func makeProductBindingResult(report xiaohongshu.ProductBindReport) ProductBindingResult {
+	return ProductBindingResult{
+		Status:            report.Status,
+		Count:             report.Count,
+		ProductsRequested: copyStrings(report.ProductsRequested),
+		ProductsResolved:  copyStrings(report.ProductsResolved),
+		ProductsMissing:   copyStrings(report.ProductsMissing),
+		VerifyConfidence:  report.VerifyConfidence,
+	}
 }
 
 func normalizeVisibility(input string) (string, error) {

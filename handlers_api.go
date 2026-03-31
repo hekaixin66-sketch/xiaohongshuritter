@@ -2,10 +2,12 @@ package main
 
 import (
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sirupsen/logrus"
 	"github.com/hekaixin66-sketch/xiaohongshuritter/xiaohongshu"
+	"github.com/sirupsen/logrus"
 )
 
 func respondError(c *gin.Context, statusCode int, code, message string, details any) {
@@ -88,6 +90,104 @@ func (s *AppServer) deleteCookiesHandler(c *gin.Context) {
 	}, "ok")
 }
 
+func (s *AppServer) publishAsyncHandler(c *gin.Context) {
+	var req PublishRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondError(c, http.StatusBadRequest, "INVALID_REQUEST", "invalid request", err.Error())
+		return
+	}
+	req.Mode = string(PublishModeAsync)
+
+	ctx, scope, err := s.resolveScopeForHTTP(c, req.AccountScope)
+	if err != nil {
+		respondError(c, http.StatusBadRequest, "INVALID_ACCOUNT_SCOPE", "invalid tenant/account", err.Error())
+		return
+	}
+	_ = ctx
+
+	result, err := s.jobManager.SubmitContent(scope, &req)
+	if err != nil {
+		respondError(c, http.StatusInternalServerError, "PUBLISH_ASYNC_FAILED", "publish async failed", err.Error())
+		return
+	}
+
+	c.Set("account", scopeLabel(scope))
+	respondSuccess(c, result, "accepted")
+}
+
+func (s *AppServer) publishVideoAsyncHandler(c *gin.Context) {
+	var req PublishVideoRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondError(c, http.StatusBadRequest, "INVALID_REQUEST", "invalid request", err.Error())
+		return
+	}
+	req.Mode = string(PublishModeAsync)
+
+	ctx, scope, err := s.resolveScopeForHTTP(c, req.AccountScope)
+	if err != nil {
+		respondError(c, http.StatusBadRequest, "INVALID_ACCOUNT_SCOPE", "invalid tenant/account", err.Error())
+		return
+	}
+	_ = ctx
+
+	result, err := s.jobManager.SubmitVideo(scope, &req)
+	if err != nil {
+		respondError(c, http.StatusInternalServerError, "PUBLISH_VIDEO_ASYNC_FAILED", "publish video async failed", err.Error())
+		return
+	}
+
+	c.Set("account", scopeLabel(scope))
+	respondSuccess(c, result, "accepted")
+}
+
+func (s *AppServer) publishJobStatusHandler(c *gin.Context) {
+	jobID := strings.TrimSpace(c.Param("job_id"))
+	if jobID == "" {
+		respondError(c, http.StatusBadRequest, "MISSING_JOB_ID", "job_id is required", nil)
+		return
+	}
+
+	result, err := s.jobManager.Get(jobID)
+	if err != nil {
+		respondError(c, http.StatusNotFound, "JOB_NOT_FOUND", "publish job not found", err.Error())
+		return
+	}
+
+	c.Set("account", "system")
+	respondSuccess(c, result, "ok")
+}
+
+func (s *AppServer) verifyPublishedNoteHandler(c *gin.Context) {
+	var req VerifyPublishedNoteRequest
+	switch c.Request.Method {
+	case http.MethodPost:
+		if err := c.ShouldBindJSON(&req); err != nil {
+			respondError(c, http.StatusBadRequest, "INVALID_REQUEST", "invalid request", err.Error())
+			return
+		}
+	default:
+		req.JobID = c.Query("job_id")
+		req.NoteID = c.Query("note_id")
+		req.FeedID = c.Query("feed_id")
+		req.XsecToken = c.Query("xsec_token")
+	}
+
+	ctx, scope, err := s.resolveScopeForHTTP(c, req.AccountScope)
+	if err != nil {
+		respondError(c, http.StatusBadRequest, "INVALID_ACCOUNT_SCOPE", "invalid tenant/account", err.Error())
+		return
+	}
+
+	result, err := s.VerifyPublishedNote(ctx, &req)
+	if err != nil {
+		respondError(c, http.StatusInternalServerError, "VERIFY_PUBLISHED_NOTE_FAILED", "failed to verify published note", err.Error())
+		return
+	}
+
+	c.Set("account", scopeLabel(scope))
+	respondSuccess(c, result, "ok")
+}
+
 func (s *AppServer) publishHandler(c *gin.Context) {
 	var req PublishRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -101,9 +201,20 @@ func (s *AppServer) publishHandler(c *gin.Context) {
 		return
 	}
 
+	if strings.EqualFold(strings.TrimSpace(req.Mode), string(PublishModeAsync)) {
+		result, submitErr := s.jobManager.SubmitContent(scope, &req)
+		if submitErr != nil {
+			respondError(c, http.StatusInternalServerError, "PUBLISH_ASYNC_FAILED", "publish async failed", submitErr.Error())
+			return
+		}
+		c.Set("account", scopeLabel(scope))
+		respondSuccess(c, result, "accepted")
+		return
+	}
+
 	result, err := s.xiaohongshuService.PublishContent(ctx, &req)
 	if err != nil {
-		respondError(c, http.StatusInternalServerError, "PUBLISH_FAILED", "publish failed", err.Error())
+		respondError(c, http.StatusInternalServerError, "PUBLISH_FAILED", "publish failed", result)
 		return
 	}
 
@@ -124,9 +235,54 @@ func (s *AppServer) publishVideoHandler(c *gin.Context) {
 		return
 	}
 
+	if strings.EqualFold(strings.TrimSpace(req.Mode), string(PublishModeAsync)) {
+		result, submitErr := s.jobManager.SubmitVideo(scope, &req)
+		if submitErr != nil {
+			respondError(c, http.StatusInternalServerError, "PUBLISH_VIDEO_ASYNC_FAILED", "publish video async failed", submitErr.Error())
+			return
+		}
+		c.Set("account", scopeLabel(scope))
+		respondSuccess(c, result, "accepted")
+		return
+	}
+
 	result, err := s.xiaohongshuService.PublishVideo(ctx, &req)
 	if err != nil {
-		respondError(c, http.StatusInternalServerError, "PUBLISH_VIDEO_FAILED", "publish video failed", err.Error())
+		respondError(c, http.StatusInternalServerError, "PUBLISH_VIDEO_FAILED", "publish video failed", result)
+		return
+	}
+
+	c.Set("account", scopeLabel(scope))
+	respondSuccess(c, result, "ok")
+}
+
+func (s *AppServer) recentPublishedNotesHandler(c *gin.Context) {
+	var req RecentPublishedNotesRequest
+	switch c.Request.Method {
+	case http.MethodPost:
+		if err := c.ShouldBindJSON(&req); err != nil {
+			respondError(c, http.StatusBadRequest, "INVALID_REQUEST", "invalid request", err.Error())
+			return
+		}
+	default:
+		req.TitleKeyword = c.Query("title_keyword")
+		req.SinceTime = c.Query("since_time")
+		if limit := strings.TrimSpace(c.Query("limit")); limit != "" {
+			if parsed, err := strconv.Atoi(limit); err == nil {
+				req.Limit = parsed
+			}
+		}
+	}
+
+	ctx, scope, err := s.resolveScopeForHTTP(c, req.AccountScope)
+	if err != nil {
+		respondError(c, http.StatusBadRequest, "INVALID_ACCOUNT_SCOPE", "invalid tenant/account", err.Error())
+		return
+	}
+
+	result, err := s.xiaohongshuService.ListRecentPublishedNotes(ctx, &req)
+	if err != nil {
+		respondError(c, http.StatusInternalServerError, "LIST_RECENT_NOTES_FAILED", "failed to list recent published notes", err.Error())
 		return
 	}
 

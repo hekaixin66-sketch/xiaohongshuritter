@@ -32,6 +32,9 @@ type PublishContentArgs struct {
 	IsOriginal bool     `json:"is_original,omitempty" jsonschema:"declare original content"`
 	Visibility string   `json:"visibility,omitempty" jsonschema:"visibility level"`
 	Products   []string `json:"products,omitempty" jsonschema:"product search keywords"`
+	TaskID     string   `json:"task_id,omitempty" jsonschema:"optional task id"`
+	BatchID    string   `json:"batch_id,omitempty" jsonschema:"optional batch id"`
+	Mode       string   `json:"mode,omitempty" jsonschema:"sync or async"`
 }
 
 // PublishVideoArgs MCP args for video publish.
@@ -44,6 +47,28 @@ type PublishVideoArgs struct {
 	ScheduleAt string   `json:"schedule_at,omitempty" jsonschema:"RFC3339 schedule time"`
 	Visibility string   `json:"visibility,omitempty" jsonschema:"visibility level"`
 	Products   []string `json:"products,omitempty" jsonschema:"product keywords"`
+	TaskID     string   `json:"task_id,omitempty" jsonschema:"optional task id"`
+	BatchID    string   `json:"batch_id,omitempty" jsonschema:"optional batch id"`
+	Mode       string   `json:"mode,omitempty" jsonschema:"sync or async"`
+}
+
+type PublishJobStatusArgs struct {
+	JobID string `json:"job_id" jsonschema:"publish job id"`
+}
+
+type RecentPublishedNotesArgs struct {
+	AccountScopedArgs
+	SinceTime    string `json:"since_time,omitempty" jsonschema:"RFC3339 lower bound"`
+	TitleKeyword string `json:"title_keyword,omitempty" jsonschema:"title keyword filter"`
+	Limit        int    `json:"limit,omitempty" jsonschema:"max notes to return"`
+}
+
+type VerifyPublishedNoteArgs struct {
+	AccountScopedArgs
+	JobID     string `json:"job_id,omitempty" jsonschema:"publish job id"`
+	NoteID    string `json:"note_id,omitempty" jsonschema:"note id"`
+	FeedID    string `json:"feed_id,omitempty" jsonschema:"feed id"`
+	XsecToken string `json:"xsec_token,omitempty" jsonschema:"feed xsec token"`
 }
 
 // SearchFeedsArgs MCP args for search.
@@ -221,6 +246,107 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 
 	mcp.AddTool(server,
 		&mcp.Tool{
+			Name:        "submit_publish_content_async",
+			Description: "submit async xiaohongshu image publish job",
+			Annotations: &mcp.ToolAnnotations{Title: "Submit Publish Content Async", DestructiveHint: boolPtr(true)},
+		},
+		withPanicRecovery("submit_publish_content_async", func(ctx context.Context, req *mcp.CallToolRequest, args PublishContentArgs) (*mcp.CallToolResult, any, error) {
+			scopedCtx, scopeErr := resolveScopedContext(appServer, ctx, args.Scope())
+			if scopeErr != nil {
+				return scopeErr, nil, nil
+			}
+			args.Mode = string(PublishModeAsync)
+			result := appServer.handlePublishContent(scopedCtx, map[string]interface{}{
+				"title":       args.Title,
+				"content":     args.Content,
+				"images":      convertStringsToInterfaces(args.Images),
+				"tags":        convertStringsToInterfaces(args.Tags),
+				"schedule_at": args.ScheduleAt,
+				"is_original": args.IsOriginal,
+				"visibility":  args.Visibility,
+				"products":    convertStringsToInterfaces(args.Products),
+				"task_id":     args.TaskID,
+				"batch_id":    args.BatchID,
+				"mode":        args.Mode,
+			})
+			return convertToMCPResult(result), nil, nil
+		}),
+	)
+
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "submit_publish_video_async",
+			Description: "submit async xiaohongshu video publish job",
+			Annotations: &mcp.ToolAnnotations{Title: "Submit Publish Video Async", DestructiveHint: boolPtr(true)},
+		},
+		withPanicRecovery("submit_publish_video_async", func(ctx context.Context, req *mcp.CallToolRequest, args PublishVideoArgs) (*mcp.CallToolResult, any, error) {
+			scopedCtx, scopeErr := resolveScopedContext(appServer, ctx, args.Scope())
+			if scopeErr != nil {
+				return scopeErr, nil, nil
+			}
+			args.Mode = string(PublishModeAsync)
+			result := appServer.handlePublishVideo(scopedCtx, map[string]interface{}{
+				"title":       args.Title,
+				"content":     args.Content,
+				"video":       args.Video,
+				"tags":        convertStringsToInterfaces(args.Tags),
+				"schedule_at": args.ScheduleAt,
+				"visibility":  args.Visibility,
+				"products":    convertStringsToInterfaces(args.Products),
+				"task_id":     args.TaskID,
+				"batch_id":    args.BatchID,
+				"mode":        args.Mode,
+			})
+			return convertToMCPResult(result), nil, nil
+		}),
+	)
+
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "get_publish_job_status",
+			Description: "get async publish job status and final entity result",
+			Annotations: &mcp.ToolAnnotations{Title: "Get Publish Job Status", ReadOnlyHint: true},
+		},
+		withPanicRecovery("get_publish_job_status", func(ctx context.Context, req *mcp.CallToolRequest, args PublishJobStatusArgs) (*mcp.CallToolResult, any, error) {
+			result := appServer.handleGetPublishJobStatus(ctx, args.JobID)
+			return convertToMCPResult(result), nil, nil
+		}),
+	)
+
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "list_recent_published_notes",
+			Description: "list recent published notes for the current account",
+			Annotations: &mcp.ToolAnnotations{Title: "List Recent Published Notes", ReadOnlyHint: true},
+		},
+		withPanicRecovery("list_recent_published_notes", func(ctx context.Context, req *mcp.CallToolRequest, args RecentPublishedNotesArgs) (*mcp.CallToolResult, any, error) {
+			scopedCtx, scopeErr := resolveScopedContext(appServer, ctx, args.Scope())
+			if scopeErr != nil {
+				return scopeErr, nil, nil
+			}
+			result := appServer.handleListRecentPublishedNotes(scopedCtx, args)
+			return convertToMCPResult(result), nil, nil
+		}),
+	)
+
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "verify_published_note",
+			Description: "verify a published note by job_id or note/feed identifiers",
+			Annotations: &mcp.ToolAnnotations{Title: "Verify Published Note", ReadOnlyHint: true},
+		},
+		withPanicRecovery("verify_published_note", func(ctx context.Context, req *mcp.CallToolRequest, args VerifyPublishedNoteArgs) (*mcp.CallToolResult, any, error) {
+			scopedCtx, scopeErr := resolveScopedContext(appServer, ctx, args.Scope())
+			if scopeErr != nil {
+				return scopeErr, nil, nil
+			}
+			result := appServer.handleVerifyPublishedNote(scopedCtx, args)
+			return convertToMCPResult(result), nil, nil
+		}),
+	)
+
+	mcp.AddTool(server,
+		&mcp.Tool{
 			Name:        "publish_content",
 			Description: "publish xiaohongshu image content",
 			Annotations: &mcp.ToolAnnotations{Title: "Publish Content", DestructiveHint: boolPtr(true)},
@@ -239,6 +365,9 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 				"is_original": args.IsOriginal,
 				"visibility":  args.Visibility,
 				"products":    convertStringsToInterfaces(args.Products),
+				"task_id":     args.TaskID,
+				"batch_id":    args.BatchID,
+				"mode":        args.Mode,
 			}
 			result := appServer.handlePublishContent(scopedCtx, argsMap)
 			return convertToMCPResult(result), nil, nil
@@ -393,6 +522,9 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 				"schedule_at": args.ScheduleAt,
 				"visibility":  args.Visibility,
 				"products":    convertStringsToInterfaces(args.Products),
+				"task_id":     args.TaskID,
+				"batch_id":    args.BatchID,
+				"mode":        args.Mode,
 			}
 			result := appServer.handlePublishVideo(scopedCtx, argsMap)
 			return convertToMCPResult(result), nil, nil
@@ -433,7 +565,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		}),
 	)
 
-	logrus.Infof("Registered %d MCP tools", 14)
+	logrus.Infof("Registered %d MCP tools", 19)
 }
 
 func convertToMCPResult(result *MCPToolResult) *mcp.CallToolResult {

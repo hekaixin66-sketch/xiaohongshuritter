@@ -68,15 +68,15 @@ func NewPublishImageAction(page *rod.Page) (*PublishAction, error) {
 	}, nil
 }
 
-func (p *PublishAction) Publish(ctx context.Context, content PublishImageContent) error {
+func (p *PublishAction) Publish(ctx context.Context, content PublishImageContent) (*PublishArtifacts, error) {
 	if len(content.ImagePaths) == 0 {
-		return errors.New("图片不能为空")
+		return nil, errors.New("图片不能为空")
 	}
 
 	page := p.page.Context(ctx)
 
 	if err := uploadImages(page, content.ImagePaths); err != nil {
-		return errors.Wrap(err, "小红书上传图片失败")
+		return nil, errors.Wrap(err, "小红书上传图片失败")
 	}
 
 	tags := content.Tags
@@ -87,11 +87,12 @@ func (p *PublishAction) Publish(ctx context.Context, content PublishImageContent
 
 	logrus.Infof("发布内容: title=%s, images=%v, tags=%v, schedule=%v, original=%v, visibility=%s, products=%v", content.Title, len(content.ImagePaths), tags, content.ScheduleTime, content.IsOriginal, content.Visibility, content.Products)
 
-	if err := submitPublish(page, content.Title, content.Content, tags, content.ScheduleTime, content.IsOriginal, content.Visibility, content.Products); err != nil {
-		return errors.Wrap(err, "小红书发布失败")
+	artifacts, err := submitPublish(page, content.Title, content.Content, tags, content.ScheduleTime, content.IsOriginal, content.Visibility, content.Products)
+	if err != nil {
+		return artifacts, errors.Wrap(err, "小红书发布失败")
 	}
 
-	return nil
+	return artifacts, nil
 }
 
 func removePopCover(page *rod.Page) {
@@ -271,19 +272,19 @@ func waitForUploadComplete(page *rod.Page, expectedCount int) error {
 	return errors.Errorf("第%d张图片上传超时(60s)，请检查网络连接和图片大小", expectedCount)
 }
 
-func submitPublish(page *rod.Page, title, content string, tags []string, scheduleTime *time.Time, isOriginal bool, visibility string, products []string) error {
+func submitPublish(page *rod.Page, title, content string, tags []string, scheduleTime *time.Time, isOriginal bool, visibility string, products []string) (*PublishArtifacts, error) {
 	titleElem, err := page.Element("div.d-input input")
 	if err != nil {
-		return errors.Wrap(err, "查找标题输入框失败")
+		return nil, errors.Wrap(err, "查找标题输入框失败")
 	}
 	if err := titleElem.Input(title); err != nil {
-		return errors.Wrap(err, "输入标题失败")
+		return nil, errors.Wrap(err, "输入标题失败")
 	}
 
 	// 检查标题长度
 	time.Sleep(500 * time.Millisecond)
 	if err := checkTitleMaxLength(page); err != nil {
-		return err
+		return nil, err
 	}
 	slog.Info("检查标题长度：通过")
 
@@ -291,37 +292,37 @@ func submitPublish(page *rod.Page, title, content string, tags []string, schedul
 
 	contentElem, ok := getContentElement(page)
 	if !ok {
-		return errors.New("没有找到内容输入框")
+		return nil, errors.New("没有找到内容输入框")
 	}
 	if err := contentElem.Input(content); err != nil {
-		return errors.Wrap(err, "输入正文失败")
+		return nil, errors.Wrap(err, "输入正文失败")
 	}
 	if err := waitAndClickTitleInput(titleElem); err != nil {
-		return err
+		return nil, err
 	}
 	if err := inputTags(contentElem, tags); err != nil {
-		return err
+		return nil, err
 	}
 
 	time.Sleep(1 * time.Second)
 
 	// 检查正文长度
 	if err := checkContentMaxLength(page); err != nil {
-		return err
+		return nil, err
 	}
 	slog.Info("检查正文长度：通过")
 
 	// 处理定时发布
 	if scheduleTime != nil {
 		if err := setSchedulePublish(page, *scheduleTime); err != nil {
-			return errors.Wrap(err, "设置定时发布失败")
+			return nil, errors.Wrap(err, "设置定时发布失败")
 		}
 		slog.Info("定时发布设置完成", "schedule_time", scheduleTime.Format("2006-01-02 15:04"))
 	}
 
 	// 设置可见范围
 	if err := setVisibility(page, visibility); err != nil {
-		return errors.Wrap(err, "设置可见范围失败")
+		return nil, errors.Wrap(err, "设置可见范围失败")
 	}
 
 	// 处理原创声明
@@ -334,20 +335,21 @@ func submitPublish(page *rod.Page, title, content string, tags []string, schedul
 	}
 
 	// 绑定商品
-	if err := bindProducts(page, products); err != nil {
-		return errors.Wrap(err, "绑定商品失败")
+	productBind, err := bindProducts(page, products)
+	if err != nil {
+		return &PublishArtifacts{ProductBind: productBind}, errors.Wrap(err, "绑定商品失败")
 	}
 
 	submitButton, err := page.Element(".publish-page-publish-btn button.bg-red")
 	if err != nil {
-		return errors.Wrap(err, "查找发布按钮失败")
+		return nil, errors.Wrap(err, "查找发布按钮失败")
 	}
 	if err := submitButton.Click(proto.InputMouseButtonLeft, 1); err != nil {
-		return errors.Wrap(err, "点击发布按钮失败")
+		return nil, errors.Wrap(err, "点击发布按钮失败")
 	}
 
 	time.Sleep(3 * time.Second)
-	return nil
+	return &PublishArtifacts{ProductBind: productBind}, nil
 }
 
 // waitAndClickTitleInput 在填写正文后等待 1 秒并回点标题输入框，增强后续交互稳定性
@@ -843,23 +845,25 @@ func confirmOriginalDeclaration(page *rod.Page) error {
 }
 
 // bindProducts 绑定商品到发布内容
-func bindProducts(page *rod.Page, products []string) error {
+func bindProducts(page *rod.Page, products []string) (ProductBindReport, error) {
+	report := newProductBindReport(products)
 	if len(products) == 0 {
-		return nil
+		report.finalize()
+		return report, nil
 	}
 
 	slog.Info("开始绑定商品", "products", products)
 
 	// 点击"添加商品"按钮
 	if err := clickAddProductButton(page); err != nil {
-		return errors.Wrap(err, "点击添加商品按钮失败")
+		return report, errors.Wrap(err, "点击添加商品按钮失败")
 	}
 	time.Sleep(1 * time.Second)
 
 	// 等待商品选择弹窗出现
 	modal, err := waitForProductModal(page)
 	if err != nil {
-		return errors.Wrap(err, "等待商品弹窗失败")
+		return report, errors.Wrap(err, "等待商品弹窗失败")
 	}
 	slog.Info("商品选择弹窗已打开")
 
@@ -869,6 +873,9 @@ func bindProducts(page *rod.Page, products []string) error {
 		if err := searchAndSelectProduct(page, modal, keyword); err != nil {
 			slog.Warn("搜索选择商品失败", "keyword", keyword, "error", err)
 			failedProducts = append(failedProducts, keyword)
+			report.ProductsMissing = appendUnique(report.ProductsMissing, keyword)
+		} else {
+			report.ProductsResolved = appendUnique(report.ProductsResolved, keyword)
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
@@ -876,7 +883,7 @@ func bindProducts(page *rod.Page, products []string) error {
 	// 点击保存按钮
 	slog.Info("准备点击保存按钮")
 	if err := clickModalSaveButton(page, modal); err != nil {
-		return errors.Wrap(err, "点击保存按钮失败")
+		return report, errors.Wrap(err, "点击保存按钮失败")
 	}
 	slog.Info("保存按钮点击完成，开始等待弹窗关闭")
 
@@ -888,12 +895,17 @@ func bindProducts(page *rod.Page, products []string) error {
 	}
 
 	if len(failedProducts) > 0 {
-		return errors.Errorf("部分商品未找到: %v", failedProducts)
+		report.finalize()
+		return report, &ProductBindError{
+			Report: report,
+			Err:    errors.Errorf("部分商品未找到: %v", failedProducts),
+		}
 	}
 
 	slog.Info("商品绑定完成", "total", len(products))
 	time.Sleep(1000 * time.Millisecond)
-	return nil
+	report.finalize()
+	return report, nil
 }
 
 // clickAddProductButton 点击"添加商品"按钮

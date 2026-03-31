@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sirupsen/logrus"
 	"github.com/hekaixin66-sketch/xiaohongshuritter/xiaohongshu"
+	"github.com/sirupsen/logrus"
 )
 
 func parseVisibility(args map[string]interface{}) string {
@@ -21,6 +21,20 @@ func parseVisibility(args map[string]interface{}) string {
 		return s
 	}
 	return ""
+}
+
+func parseMode(args map[string]interface{}) string {
+	mode, _ := args["mode"].(string)
+	return mode
+}
+
+func jsonToolResult(data any, isError bool) *MCPToolResult {
+	jsonData, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		logrus.WithError(err).Error("marshal MCP response failed")
+		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "marshal response failed"}}, IsError: true}
+	}
+	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: string(jsonData)}}, IsError: isError}
 }
 
 func (s *AppServer) handleCheckLoginStatus(ctx context.Context) *MCPToolResult {
@@ -82,6 +96,9 @@ func (s *AppServer) handlePublishContent(ctx context.Context, args map[string]in
 	scheduleAt, _ := args["schedule_at"].(string)
 	visibility := parseVisibility(args)
 	isOriginal, _ := args["is_original"].(bool)
+	taskID, _ := args["task_id"].(string)
+	batchID, _ := args["batch_id"].(string)
+	mode := parseMode(args)
 
 	req := &PublishRequest{
 		Title:      title,
@@ -92,14 +109,26 @@ func (s *AppServer) handlePublishContent(ctx context.Context, args map[string]in
 		IsOriginal: isOriginal,
 		Visibility: visibility,
 		Products:   products,
+		TaskID:     taskID,
+		BatchID:    batchID,
+		Mode:       mode,
+	}
+
+	if strings.EqualFold(strings.TrimSpace(req.Mode), string(PublishModeAsync)) {
+		scope := AccountScopeFromContext(ctx)
+		result, err := s.jobManager.SubmitContent(scope, req)
+		if err != nil {
+			return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "publish async failed: " + err.Error()}}, IsError: true}
+		}
+		return jsonToolResult(result, false)
 	}
 
 	result, err := s.xiaohongshuService.PublishContent(ctx, req)
 	if err != nil {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "publish failed: " + err.Error()}}, IsError: true}
+		return jsonToolResult(result, true)
 	}
 
-	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: fmt.Sprintf("publish success: %+v", result)}}}
+	return jsonToolResult(result, false)
 }
 
 func (s *AppServer) handlePublishVideo(ctx context.Context, args map[string]interface{}) *MCPToolResult {
@@ -110,6 +139,9 @@ func (s *AppServer) handlePublishVideo(ctx context.Context, args map[string]inte
 	products := parseStringSlice(args["products"])
 	scheduleAt, _ := args["schedule_at"].(string)
 	visibility := parseVisibility(args)
+	taskID, _ := args["task_id"].(string)
+	batchID, _ := args["batch_id"].(string)
+	mode := parseMode(args)
 
 	if videoPath == "" {
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "publish failed: missing video path"}}, IsError: true}
@@ -123,14 +155,61 @@ func (s *AppServer) handlePublishVideo(ctx context.Context, args map[string]inte
 		ScheduleAt: scheduleAt,
 		Visibility: visibility,
 		Products:   products,
+		TaskID:     taskID,
+		BatchID:    batchID,
+		Mode:       mode,
+	}
+
+	if strings.EqualFold(strings.TrimSpace(req.Mode), string(PublishModeAsync)) {
+		scope := AccountScopeFromContext(ctx)
+		result, err := s.jobManager.SubmitVideo(scope, req)
+		if err != nil {
+			return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "publish video async failed: " + err.Error()}}, IsError: true}
+		}
+		return jsonToolResult(result, false)
 	}
 
 	result, err := s.xiaohongshuService.PublishVideo(ctx, req)
 	if err != nil {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "publish video failed: " + err.Error()}}, IsError: true}
+		return jsonToolResult(result, true)
 	}
 
-	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: fmt.Sprintf("publish video success: %+v", result)}}}
+	return jsonToolResult(result, false)
+}
+
+func (s *AppServer) handleGetPublishJobStatus(_ context.Context, jobID string) *MCPToolResult {
+	result, err := s.jobManager.Get(jobID)
+	if err != nil {
+		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "get publish job status failed: " + err.Error()}}, IsError: true}
+	}
+	return jsonToolResult(result, false)
+}
+
+func (s *AppServer) handleListRecentPublishedNotes(ctx context.Context, args RecentPublishedNotesArgs) *MCPToolResult {
+	result, err := s.xiaohongshuService.ListRecentPublishedNotes(ctx, &RecentPublishedNotesRequest{
+		AccountScope: args.Scope(),
+		SinceTime:    args.SinceTime,
+		TitleKeyword: args.TitleKeyword,
+		Limit:        args.Limit,
+	})
+	if err != nil {
+		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "list recent published notes failed: " + err.Error()}}, IsError: true}
+	}
+	return jsonToolResult(result, false)
+}
+
+func (s *AppServer) handleVerifyPublishedNote(ctx context.Context, args VerifyPublishedNoteArgs) *MCPToolResult {
+	result, err := s.VerifyPublishedNote(ctx, &VerifyPublishedNoteRequest{
+		AccountScope: args.Scope(),
+		JobID:        args.JobID,
+		NoteID:       args.NoteID,
+		FeedID:       args.FeedID,
+		XsecToken:    args.XsecToken,
+	})
+	if err != nil {
+		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "verify published note failed: " + err.Error()}}, IsError: true}
+	}
+	return jsonToolResult(result, false)
 }
 
 func (s *AppServer) handleListFeeds(ctx context.Context) *MCPToolResult {

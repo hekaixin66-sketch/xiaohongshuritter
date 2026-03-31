@@ -23,7 +23,7 @@ func TestPublish(t *testing.T) {
 	action, err := NewPublishImageAction(page)
 	require.NoError(t, err)
 
-	err = action.Publish(context.Background(), PublishImageContent{
+	_, err = action.Publish(context.Background(), PublishImageContent{
 		Title:      "Hello World",
 		Content:    "Hello World",
 		ImagePaths: []string{"/tmp/1.jpg"},

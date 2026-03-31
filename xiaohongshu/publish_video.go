@@ -53,21 +53,22 @@ func NewPublishVideoAction(page *rod.Page) (*PublishAction, error) {
 }
 
 // PublishVideo 上传视频并提交
-func (p *PublishAction) PublishVideo(ctx context.Context, content PublishVideoContent) error {
+func (p *PublishAction) PublishVideo(ctx context.Context, content PublishVideoContent) (*PublishArtifacts, error) {
 	if content.VideoPath == "" {
-		return errors.New("视频不能为空")
+		return nil, errors.New("视频不能为空")
 	}
 
 	page := p.page.Context(ctx)
 
 	if err := uploadVideo(page, content.VideoPath); err != nil {
-		return errors.Wrap(err, "小红书上传视频失败")
+		return nil, errors.Wrap(err, "小红书上传视频失败")
 	}
 
-	if err := submitPublishVideo(page, content.Title, content.Content, content.Tags, content.ScheduleTime, content.Visibility, content.Products); err != nil {
-		return errors.Wrap(err, "小红书发布失败")
+	artifacts, err := submitPublishVideo(page, content.Title, content.Content, content.Tags, content.ScheduleTime, content.Visibility, content.Products)
+	if err != nil {
+		return artifacts, errors.Wrap(err, "小红书发布失败")
 	}
-	return nil
+	return artifacts, nil
 }
 
 // uploadVideo 上传单个本地视频
@@ -132,30 +133,30 @@ func waitForPublishButtonClickable(page *rod.Page) (*rod.Element, error) {
 }
 
 // submitPublishVideo 填写标题、正文、标签并点击发布（等待按钮可点击后再提交）
-func submitPublishVideo(page *rod.Page, title, content string, tags []string, scheduleTime *time.Time, visibility string, products []string) error {
+func submitPublishVideo(page *rod.Page, title, content string, tags []string, scheduleTime *time.Time, visibility string, products []string) (*PublishArtifacts, error) {
 	// 标题
 	titleElem, err := page.Element("div.d-input input")
 	if err != nil {
-		return errors.Wrap(err, "查找标题输入框失败")
+		return nil, errors.Wrap(err, "查找标题输入框失败")
 	}
 	if err := titleElem.Input(title); err != nil {
-		return errors.Wrap(err, "输入标题失败")
+		return nil, errors.Wrap(err, "输入标题失败")
 	}
 	time.Sleep(1 * time.Second)
 
 	// 正文 + 标签
 	contentElem, ok := getContentElement(page)
 	if !ok {
-		return errors.New("没有找到内容输入框")
+		return nil, errors.New("没有找到内容输入框")
 	}
 	if err := contentElem.Input(content); err != nil {
-		return errors.Wrap(err, "输入正文失败")
+		return nil, errors.Wrap(err, "输入正文失败")
 	}
 	if err := waitAndClickTitleInput(titleElem); err != nil {
-		return err
+		return nil, err
 	}
 	if err := inputTags(contentElem, tags); err != nil {
-		return err
+		return nil, err
 	}
 
 	time.Sleep(1 * time.Second)
@@ -163,32 +164,33 @@ func submitPublishVideo(page *rod.Page, title, content string, tags []string, sc
 	// 处理定时发布
 	if scheduleTime != nil {
 		if err := setSchedulePublish(page, *scheduleTime); err != nil {
-			return errors.Wrap(err, "设置定时发布失败")
+			return nil, errors.Wrap(err, "设置定时发布失败")
 		}
 		slog.Info("定时发布设置完成", "schedule_time", scheduleTime.Format("2006-01-02 15:04"))
 	}
 
 	// 设置可见范围
 	if err := setVisibility(page, visibility); err != nil {
-		return errors.Wrap(err, "设置可见范围失败")
+		return nil, errors.Wrap(err, "设置可见范围失败")
 	}
 
 	// 绑定商品
-	if err := bindProducts(page, products); err != nil {
-		return errors.Wrap(err, "绑定商品失败")
+	productBind, err := bindProducts(page, products)
+	if err != nil {
+		return &PublishArtifacts{ProductBind: productBind}, errors.Wrap(err, "绑定商品失败")
 	}
 
 	// 等待发布按钮可点击
 	btn, err := waitForPublishButtonClickable(page)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// 点击发布
 	if err := btn.Click(proto.InputMouseButtonLeft, 1); err != nil {
-		return errors.Wrap(err, "点击发布按钮失败")
+		return nil, errors.Wrap(err, "点击发布按钮失败")
 	}
 
 	time.Sleep(3 * time.Second)
-	return nil
+	return &PublishArtifacts{ProductBind: productBind}, nil
 }
