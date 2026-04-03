@@ -2,7 +2,7 @@
 
 This package is the recommended OpenClaw delivery wrapper for ARM64 and browser-bundled deployment.
 
-Release version: `v1.0.0`
+Release version: `v1.0.1`
 
 ## Why use this package
 

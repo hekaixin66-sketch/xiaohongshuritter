@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-rod/rod"
@@ -21,6 +22,19 @@ import (
 // XiaohongshuService encapsulates business operations.
 type XiaohongshuService struct {
 	accountManager *AccountManager
+	loginWatchers  map[string]*loginWatcher
+	loginMu        sync.Mutex
+}
+
+type loginWatcher struct {
+	img       string
+	timeout   time.Duration
+	startedAt time.Time
+	cancel    context.CancelFunc
+	ready     chan struct{}
+	readyOnce sync.Once
+	err       error
+	loggedIn  bool
 }
 
 func NewXiaohongshuService() (*XiaohongshuService, error) {
@@ -28,7 +42,10 @@ func NewXiaohongshuService() (*XiaohongshuService, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &XiaohongshuService{accountManager: manager}, nil
+	return &XiaohongshuService{
+		accountManager: manager,
+		loginWatchers:  make(map[string]*loginWatcher),
+	}, nil
 }
 
 func (s *XiaohongshuService) ResolveScope(scope AccountScope) (AccountScope, error) {
@@ -123,6 +140,13 @@ type UserProfileResponse struct {
 }
 
 func (s *XiaohongshuService) DeleteCookies(ctx context.Context) (string, error) {
+	scope, err := s.ResolveScope(AccountScopeFromContext(ctx))
+	if err != nil {
+		return "", err
+	}
+	ctx = WithAccountScope(ctx, scope)
+	s.clearLoginWatcher(scope.Label())
+
 	session, err := s.acquireSession(ctx)
 	if err != nil {
 		return "", err
@@ -160,55 +184,83 @@ func (s *XiaohongshuService) CheckLoginStatus(ctx context.Context) (*LoginStatus
 }
 
 func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeResponse, error) {
-	session, err := s.acquireSession(ctx)
+	const timeout = 4 * time.Minute
+
+	scope, err := s.ResolveScope(AccountScopeFromContext(ctx))
 	if err != nil {
 		return nil, err
 	}
+	ctx = WithAccountScope(ctx, scope)
+	watcherKey := scope.Label()
 
-	b := newBrowserForSession(session)
-	page := b.NewPage()
+	if watcher, created := s.getOrCreateLoginWatcher(scope, timeout); watcher != nil {
+		if !created {
+			if err := watcher.waitUntilReady(ctx); err != nil {
+				return nil, err
+			}
+			if watcher.err != nil {
+				return nil, watcher.err
+			}
+			return loginQrcodeResponseFromWatcher(watcher), nil
+		}
+		defer func() {
+			if watcher.err != nil || watcher.loggedIn {
+				s.clearLoginWatcherIfMatch(watcherKey, watcher)
+			}
+		}()
 
-	cleanup := func() {
-		_ = page.Close()
-		b.Close()
-		session.Release()
-	}
+		session, err := s.acquireSession(ctx)
+		if err != nil {
+			watcher.err = err
+			watcher.finishSetup()
+			return nil, err
+		}
 
-	loginAction := xiaohongshu.NewLogin(page)
-	img, loggedIn, err := loginAction.FetchQrcodeImage(ctx)
-	if err != nil || loggedIn {
-		cleanup()
-	}
-	if err != nil {
-		return nil, err
-	}
+		b := newBrowserForSession(session)
+		page := b.NewPage()
+		cleanup := func() {
+			_ = page.Close()
+			b.Close()
+			session.Release()
+		}
 
-	timeout := 4 * time.Minute
-	if !loggedIn {
+		loginAction := xiaohongshu.NewLogin(page)
+		img, loggedIn, err := loginAction.FetchQrcodeImage(ctx)
+		if err != nil || loggedIn {
+			cleanup()
+		}
+		if err != nil {
+			watcher.err = err
+			watcher.finishSetup()
+			return nil, err
+		}
+
+		watcher.img = img
+		if loggedIn {
+			watcher.markLoggedIn()
+			return &LoginQrcodeResponse{Timeout: "0s", Img: img, IsLoggedIn: true}, nil
+		}
+
 		cookiePath := session.CookiePath
-		go func() {
-			ctxTimeout, cancel := context.WithTimeout(context.Background(), timeout)
+		ctxTimeout, cancel := context.WithTimeout(context.Background(), timeout)
+		watcher.cancel = cancel
+		watcher.finishSetup()
+		go func(activeWatcher *loginWatcher) {
 			defer cancel()
 			defer cleanup()
+			defer s.clearLoginWatcherIfMatch(watcherKey, activeWatcher)
 
 			if loginAction.WaitForLogin(ctxTimeout) {
+				activeWatcher.markLoggedIn()
 				if saveErr := saveCookiesToPath(page, cookiePath); saveErr != nil {
 					logrus.WithError(saveErr).WithField("cookie_path", cookiePath).Error("failed to save cookies")
 				}
 			}
-		}()
+		}(watcher)
+		return loginQrcodeResponseFromWatcher(watcher), nil
 	}
 
-	return &LoginQrcodeResponse{
-		Timeout: func() string {
-			if loggedIn {
-				return "0s"
-			}
-			return timeout.String()
-		}(),
-		Img:        img,
-		IsLoggedIn: loggedIn,
-	}, nil
+	return nil, fmt.Errorf("failed to create login watcher")
 }
 
 func (s *XiaohongshuService) PublishContent(ctx context.Context, req *PublishRequest) (*PublishExecutionResult, error) {
@@ -815,11 +867,162 @@ func saveCookiesToPath(page *rod.Page, cookiePath string) error {
 	return cookieLoader.SaveCookies(data)
 }
 
+func (s *XiaohongshuService) getOrCreateLoginWatcher(scope AccountScope, timeout time.Duration) (*loginWatcher, bool) {
+	key := scope.Label()
+	if key == "" {
+		return nil, false
+	}
+
+	s.loginMu.Lock()
+	defer s.loginMu.Unlock()
+
+	if watcher := s.loginWatchers[key]; watcher != nil {
+		if remainingLoginWatcherTimeout(watcher.startedAt, watcher.timeout) > 0 {
+			return watcher, false
+		}
+		delete(s.loginWatchers, key)
+		if watcher.cancel != nil {
+			watcher.cancel()
+		}
+	}
+
+	watcher := &loginWatcher{
+		timeout:   timeout,
+		startedAt: time.Now(),
+		ready:     make(chan struct{}),
+	}
+	s.loginWatchers[key] = watcher
+	return watcher, true
+}
+
+func (w *loginWatcher) markLoggedIn() {
+	if w == nil {
+		return
+	}
+	w.loggedIn = true
+	w.finishSetup()
+}
+
+func (w *loginWatcher) finishSetup() {
+	if w == nil {
+		return
+	}
+	w.readyOnce.Do(func() {
+		close(w.ready)
+	})
+}
+
+func (w *loginWatcher) waitUntilReady(ctx context.Context) error {
+	if w == nil || w.ready == nil {
+		return nil
+	}
+	select {
+	case <-w.ready:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func loginQrcodeResponseFromWatcher(watcher *loginWatcher) *LoginQrcodeResponse {
+	if watcher == nil {
+		return &LoginQrcodeResponse{}
+	}
+	if watcher.loggedIn {
+		return &LoginQrcodeResponse{Timeout: "0s", Img: watcher.img, IsLoggedIn: true}
+	}
+	return &LoginQrcodeResponse{
+		Timeout:    remainingLoginWatcherTimeout(watcher.startedAt, watcher.timeout).String(),
+		Img:        watcher.img,
+		IsLoggedIn: false,
+	}
+}
+
+func (s *XiaohongshuService) getLoginWatcher(key string) *loginWatcher {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return nil
+	}
+
+	s.loginMu.Lock()
+	watcher := s.loginWatchers[key]
+	if watcher == nil {
+		s.loginMu.Unlock()
+		return nil
+	}
+	if remainingLoginWatcherTimeout(watcher.startedAt, watcher.timeout) > 0 {
+		s.loginMu.Unlock()
+		return watcher
+	}
+	delete(s.loginWatchers, key)
+	cancel := watcher.cancel
+	s.loginMu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	return nil
+}
+
+func (s *XiaohongshuService) setLoginWatcher(key string, watcher *loginWatcher) {
+	key = strings.TrimSpace(key)
+	if key == "" || watcher == nil {
+		return
+	}
+
+	s.loginMu.Lock()
+	previous := s.loginWatchers[key]
+	s.loginWatchers[key] = watcher
+	s.loginMu.Unlock()
+
+	if previous != nil && previous != watcher && previous.cancel != nil {
+		previous.cancel()
+	}
+}
+
+func (s *XiaohongshuService) clearLoginWatcher(key string) {
+	s.clearLoginWatcherIfMatch(key, nil)
+}
+
+func (s *XiaohongshuService) clearLoginWatcherIfMatch(key string, watcher *loginWatcher) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return
+	}
+
+	var cancel context.CancelFunc
+	s.loginMu.Lock()
+	current := s.loginWatchers[key]
+	if current != nil && (watcher == nil || current == watcher) {
+		delete(s.loginWatchers, key)
+		cancel = current.cancel
+	}
+	s.loginMu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func remainingLoginWatcherTimeout(startedAt time.Time, timeout time.Duration) time.Duration {
+	if timeout <= 0 {
+		return 0
+	}
+	if startedAt.IsZero() {
+		return timeout
+	}
+	remaining := timeout - time.Since(startedAt)
+	if remaining <= 0 {
+		return 0
+	}
+	return remaining
+}
+
 func accountLabelFromSession(session *AccountSession) string {
 	if session == nil {
 		return ""
 	}
-	return session.TenantID + "/" + session.AccountID
+	return AccountScope{TenantID: session.TenantID, AccountID: session.AccountID}.Label()
 }
 
 func cleanupTempFiles(paths []string) PublishCleanupResult {

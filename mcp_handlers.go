@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -35,6 +36,24 @@ func jsonToolResult(data any, isError bool) *MCPToolResult {
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "marshal response failed"}}, IsError: true}
 	}
 	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: string(jsonData)}}, IsError: isError}
+}
+
+func mcpErrorResult(message string, err error) *MCPToolResult {
+	if err == nil {
+		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: message}}, IsError: true}
+	}
+	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: message + ": " + err.Error()}}, IsError: true}
+}
+
+func mcpPublishAsyncError(message string, err error) *MCPToolResult {
+	if err == nil {
+		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: message}}, IsError: true}
+	}
+	text := message + ": " + err.Error()
+	if errors.Is(err, ErrPublishJobQueueFull) {
+		text = message + ": queue full, retry later"
+	}
+	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: text}}, IsError: true}
 }
 
 func (s *AppServer) handleCheckLoginStatus(ctx context.Context) *MCPToolResult {
@@ -118,7 +137,7 @@ func (s *AppServer) handlePublishContent(ctx context.Context, args map[string]in
 		scope := AccountScopeFromContext(ctx)
 		result, err := s.jobManager.SubmitContent(scope, req)
 		if err != nil {
-			return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "publish async failed: " + err.Error()}}, IsError: true}
+			return mcpPublishAsyncError("publish async failed", err)
 		}
 		return jsonToolResult(result, false)
 	}
@@ -164,7 +183,7 @@ func (s *AppServer) handlePublishVideo(ctx context.Context, args map[string]inte
 		scope := AccountScopeFromContext(ctx)
 		result, err := s.jobManager.SubmitVideo(scope, req)
 		if err != nil {
-			return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "publish video async failed: " + err.Error()}}, IsError: true}
+			return mcpPublishAsyncError("publish video async failed", err)
 		}
 		return jsonToolResult(result, false)
 	}
@@ -215,15 +234,9 @@ func (s *AppServer) handleVerifyPublishedNote(ctx context.Context, args VerifyPu
 func (s *AppServer) handleListFeeds(ctx context.Context) *MCPToolResult {
 	result, err := s.xiaohongshuService.ListFeeds(ctx)
 	if err != nil {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "list feeds failed: " + err.Error()}}, IsError: true}
+		return mcpErrorResult("list feeds failed", err)
 	}
-
-	jsonData, err := json.MarshalIndent(result, "", "  ")
-	if err != nil {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: fmt.Sprintf("list feeds succeeded but marshal failed: %v", err)}}, IsError: true}
-	}
-
-	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: string(jsonData)}}}
+	return jsonToolResult(result, false)
 }
 
 func (s *AppServer) handleSearchFeeds(ctx context.Context, args SearchFeedsArgs) *MCPToolResult {
@@ -241,15 +254,9 @@ func (s *AppServer) handleSearchFeeds(ctx context.Context, args SearchFeedsArgs)
 
 	result, err := s.xiaohongshuService.SearchFeeds(ctx, args.Keyword, filter)
 	if err != nil {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "search feeds failed: " + err.Error()}}, IsError: true}
+		return mcpErrorResult("search feeds failed", err)
 	}
-
-	jsonData, err := json.MarshalIndent(result, "", "  ")
-	if err != nil {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: fmt.Sprintf("search succeeded but marshal failed: %v", err)}}, IsError: true}
-	}
-
-	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: string(jsonData)}}}
+	return jsonToolResult(result, false)
 }
 
 func (s *AppServer) handleGetFeedDetail(ctx context.Context, args map[string]any) *MCPToolResult {
@@ -318,15 +325,9 @@ func (s *AppServer) handleGetFeedDetail(ctx context.Context, args map[string]any
 
 	result, err := s.xiaohongshuService.GetFeedDetailWithConfig(ctx, feedID, xsecToken, loadAll, cfg)
 	if err != nil {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "get feed detail failed: " + err.Error()}}, IsError: true}
+		return mcpErrorResult("get feed detail failed", err)
 	}
-
-	jsonData, err := json.MarshalIndent(result, "", "  ")
-	if err != nil {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: fmt.Sprintf("get feed detail succeeded but marshal failed: %v", err)}}, IsError: true}
-	}
-
-	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: string(jsonData)}}}
+	return jsonToolResult(result, false)
 }
 
 func (s *AppServer) handleUserProfile(ctx context.Context, args map[string]any) *MCPToolResult {
@@ -341,15 +342,9 @@ func (s *AppServer) handleUserProfile(ctx context.Context, args map[string]any) 
 
 	result, err := s.xiaohongshuService.UserProfile(ctx, userID, xsecToken)
 	if err != nil {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "get user profile failed: " + err.Error()}}, IsError: true}
+		return mcpErrorResult("get user profile failed", err)
 	}
-
-	jsonData, err := json.MarshalIndent(result, "", "  ")
-	if err != nil {
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: fmt.Sprintf("get user profile succeeded but marshal failed: %v", err)}}, IsError: true}
-	}
-
-	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: string(jsonData)}}}
+	return jsonToolResult(result, false)
 }
 
 func (s *AppServer) handleLikeFeed(ctx context.Context, args map[string]interface{}) *MCPToolResult {
@@ -477,12 +472,7 @@ func (s *AppServer) handleListAccounts(ctx context.Context) *MCPToolResult {
 		"config_path": s.xiaohongshuService.AccountConfigPath(),
 		"accounts":    s.xiaohongshuService.ListAccounts(),
 	}
-	jsonData, err := json.MarshalIndent(data, "", "  ")
-	if err != nil {
-		logrus.WithError(err).Error("marshal list accounts failed")
-		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "list accounts failed: marshal error"}}, IsError: true}
-	}
-	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: string(jsonData)}}}
+	return jsonToolResult(data, false)
 }
 
 func parseStringSlice(raw any) []string {

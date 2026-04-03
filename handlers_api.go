@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -34,6 +35,14 @@ func respondSuccess(c *gin.Context, data any, message string) {
 		c.GetString("account"), http.StatusOK)
 
 	c.JSON(http.StatusOK, response)
+}
+
+func respondPublishAsyncError(c *gin.Context, code, message string, err error) {
+	statusCode := http.StatusInternalServerError
+	if errors.Is(err, ErrPublishJobQueueFull) {
+		statusCode = http.StatusServiceUnavailable
+	}
+	respondError(c, statusCode, code, message, err.Error())
 }
 
 func (s *AppServer) checkLoginStatusHandler(c *gin.Context) {
@@ -98,16 +107,15 @@ func (s *AppServer) publishAsyncHandler(c *gin.Context) {
 	}
 	req.Mode = string(PublishModeAsync)
 
-	ctx, scope, err := s.resolveScopeForHTTP(c, req.AccountScope)
+	_, scope, err := s.resolveScopeForHTTP(c, req.AccountScope)
 	if err != nil {
 		respondError(c, http.StatusBadRequest, "INVALID_ACCOUNT_SCOPE", "invalid tenant/account", err.Error())
 		return
 	}
-	_ = ctx
 
 	result, err := s.jobManager.SubmitContent(scope, &req)
 	if err != nil {
-		respondError(c, http.StatusInternalServerError, "PUBLISH_ASYNC_FAILED", "publish async failed", err.Error())
+		respondPublishAsyncError(c, "PUBLISH_ASYNC_FAILED", "publish async failed", err)
 		return
 	}
 
@@ -123,16 +131,15 @@ func (s *AppServer) publishVideoAsyncHandler(c *gin.Context) {
 	}
 	req.Mode = string(PublishModeAsync)
 
-	ctx, scope, err := s.resolveScopeForHTTP(c, req.AccountScope)
+	_, scope, err := s.resolveScopeForHTTP(c, req.AccountScope)
 	if err != nil {
 		respondError(c, http.StatusBadRequest, "INVALID_ACCOUNT_SCOPE", "invalid tenant/account", err.Error())
 		return
 	}
-	_ = ctx
 
 	result, err := s.jobManager.SubmitVideo(scope, &req)
 	if err != nil {
-		respondError(c, http.StatusInternalServerError, "PUBLISH_VIDEO_ASYNC_FAILED", "publish video async failed", err.Error())
+		respondPublishAsyncError(c, "PUBLISH_VIDEO_ASYNC_FAILED", "publish video async failed", err)
 		return
 	}
 
@@ -204,7 +211,7 @@ func (s *AppServer) publishHandler(c *gin.Context) {
 	if strings.EqualFold(strings.TrimSpace(req.Mode), string(PublishModeAsync)) {
 		result, submitErr := s.jobManager.SubmitContent(scope, &req)
 		if submitErr != nil {
-			respondError(c, http.StatusInternalServerError, "PUBLISH_ASYNC_FAILED", "publish async failed", submitErr.Error())
+			respondPublishAsyncError(c, "PUBLISH_ASYNC_FAILED", "publish async failed", submitErr)
 			return
 		}
 		c.Set("account", scopeLabel(scope))
@@ -238,7 +245,7 @@ func (s *AppServer) publishVideoHandler(c *gin.Context) {
 	if strings.EqualFold(strings.TrimSpace(req.Mode), string(PublishModeAsync)) {
 		result, submitErr := s.jobManager.SubmitVideo(scope, &req)
 		if submitErr != nil {
-			respondError(c, http.StatusInternalServerError, "PUBLISH_VIDEO_ASYNC_FAILED", "publish video async failed", submitErr.Error())
+			respondPublishAsyncError(c, "PUBLISH_VIDEO_ASYNC_FAILED", "publish video async failed", submitErr)
 			return
 		}
 		c.Set("account", scopeLabel(scope))

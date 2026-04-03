@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"context"
+	"testing"
+	"time"
+)
 
 func TestNormalizeVisibility(t *testing.T) {
 	cases := []struct {
@@ -35,5 +39,105 @@ func TestNormalizeVisibility(t *testing.T) {
 		if got != tc.out {
 			t.Fatalf("normalizeVisibility(%q) = %q, want %q", tc.in, got, tc.out)
 		}
+	}
+}
+
+func TestLoginWatcherLifecycle(t *testing.T) {
+	service := &XiaohongshuService{loginWatchers: make(map[string]*loginWatcher)}
+	ctx, cancel := context.WithCancel(context.Background())
+	watcher := &loginWatcher{
+		img:       "img",
+		timeout:   time.Minute,
+		startedAt: time.Now(),
+		cancel:    cancel,
+	}
+
+	service.setLoginWatcher("tenant/account", watcher)
+	if got := service.getLoginWatcher("tenant/account"); got != watcher {
+		t.Fatal("expected active watcher")
+	}
+
+	service.clearLoginWatcher("tenant/account")
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("expected watcher context to be canceled")
+	}
+	if got := service.getLoginWatcher("tenant/account"); got != nil {
+		t.Fatal("expected watcher to be removed")
+	}
+}
+
+func TestGetLoginWatcherRemovesExpiredWatcher(t *testing.T) {
+	service := &XiaohongshuService{loginWatchers: make(map[string]*loginWatcher)}
+	ctx, cancel := context.WithCancel(context.Background())
+	watcher := &loginWatcher{
+		img:       "img",
+		timeout:   time.Minute,
+		startedAt: time.Now().Add(-2 * time.Minute),
+		cancel:    cancel,
+	}
+
+	service.setLoginWatcher("tenant/account", watcher)
+	if got := service.getLoginWatcher("tenant/account"); got != nil {
+		t.Fatal("expected expired watcher to be ignored")
+	}
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("expected expired watcher context to be canceled")
+	}
+}
+
+func TestGetOrCreateLoginWatcherReusesPendingWatcher(t *testing.T) {
+	service := &XiaohongshuService{loginWatchers: make(map[string]*loginWatcher)}
+	scope := AccountScope{TenantID: "tenant", AccountID: "account"}
+
+	first, created := service.getOrCreateLoginWatcher(scope, time.Minute)
+	if !created || first == nil {
+		t.Fatal("expected first watcher to be created")
+	}
+
+	second, created := service.getOrCreateLoginWatcher(scope, time.Minute)
+	if created {
+		t.Fatal("expected existing watcher to be reused")
+	}
+	if second != first {
+		t.Fatal("expected same watcher instance")
+	}
+}
+
+func TestGetOrCreateLoginWatcherReplacesExpiredWatcher(t *testing.T) {
+	service := &XiaohongshuService{loginWatchers: make(map[string]*loginWatcher)}
+	scope := AccountScope{TenantID: "tenant", AccountID: "account"}
+	ctx, cancel := context.WithCancel(context.Background())
+	stale := &loginWatcher{
+		timeout:   time.Minute,
+		startedAt: time.Now().Add(-2 * time.Minute),
+		cancel:    cancel,
+		ready:     make(chan struct{}),
+	}
+	service.loginWatchers[scope.Label()] = stale
+
+	fresh, created := service.getOrCreateLoginWatcher(scope, time.Minute)
+	if !created || fresh == nil {
+		t.Fatal("expected fresh watcher to be created")
+	}
+	if fresh == stale {
+		t.Fatal("expected stale watcher to be replaced")
+	}
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("expected stale watcher to be canceled")
+	}
+}
+
+func TestLoginWatcherWaitUntilReadyHonorsContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	watcher := &loginWatcher{ready: make(chan struct{})}
+	if err := watcher.waitUntilReady(ctx); err == nil {
+		t.Fatal("expected context error")
 	}
 }

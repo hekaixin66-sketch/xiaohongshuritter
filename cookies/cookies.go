@@ -29,7 +29,6 @@ func NewLoadCookie(path string) Cookier {
 
 // LoadCookies 从文件中加载 cookies。
 func (c *localCookie) LoadCookies() ([]byte, error) {
-
 	data, err := os.ReadFile(c.path)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to read cookies from tmp file")
@@ -43,16 +42,35 @@ func (c *localCookie) SaveCookies(data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(c.path), 0755); err != nil {
 		return errors.Wrap(err, "failed to create cookies directory")
 	}
-	return os.WriteFile(c.path, data, 0644)
+
+	tmpFile, err := os.CreateTemp(filepath.Dir(c.path), filepath.Base(c.path)+".*.tmp")
+	if err != nil {
+		return errors.Wrap(err, "failed to create temp cookie file")
+	}
+	tmpPath := tmpFile.Name()
+	defer func() {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+	}()
+
+	if _, err := tmpFile.Write(data); err != nil {
+		return errors.Wrap(err, "failed to write temp cookie file")
+	}
+	if err := tmpFile.Close(); err != nil {
+		return errors.Wrap(err, "failed to close temp cookie file")
+	}
+	if err := os.Rename(tmpPath, c.path); err != nil {
+		return errors.Wrap(err, "failed to replace cookie file")
+	}
+	return nil
 }
 
 // DeleteCookies 删除 cookies 文件。
 func (c *localCookie) DeleteCookies() error {
-	if _, err := os.Stat(c.path); os.IsNotExist(err) {
-		// 文件不存在，返回 nil（认为已经删除）
-		return nil
+	if err := os.Remove(c.path); err != nil && !os.IsNotExist(err) {
+		return err
 	}
-	return os.Remove(c.path)
+	return nil
 }
 
 // GetCookiesFilePath 获取 cookies 文件路径。

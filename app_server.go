@@ -22,6 +22,13 @@ type AppServer struct {
 	httpServer         *http.Server
 }
 
+const (
+	defaultHTTPReadHeaderTimeout = 10 * time.Second
+	defaultHTTPReadTimeout       = 30 * time.Second
+	defaultHTTPWriteTimeout      = 15 * time.Minute
+	defaultHTTPIdleTimeout       = 2 * time.Minute
+)
+
 // NewAppServer 创建新的应用服务器实例
 func NewAppServer(xiaohongshuService *XiaohongshuService) *AppServer {
 	appServer := &AppServer{
@@ -43,8 +50,12 @@ func (s *AppServer) Start(port string) error {
 	s.router = setupRoutes(s)
 
 	s.httpServer = &http.Server{
-		Addr:    port,
-		Handler: s.router,
+		Addr:              port,
+		Handler:           s.router,
+		ReadHeaderTimeout: parsePositiveDurationEnv("XHS_HTTP_READ_HEADER_TIMEOUT", defaultHTTPReadHeaderTimeout),
+		ReadTimeout:       parsePositiveDurationEnv("XHS_HTTP_READ_TIMEOUT", defaultHTTPReadTimeout),
+		WriteTimeout:      parsePositiveDurationEnv("XHS_HTTP_WRITE_TIMEOUT", defaultHTTPWriteTimeout),
+		IdleTimeout:       parsePositiveDurationEnv("XHS_HTTP_IDLE_TIMEOUT", defaultHTTPIdleTimeout),
 	}
 
 	// 启动服务器的 goroutine
@@ -71,6 +82,7 @@ func (s *AppServer) Start(port string) error {
 	} else {
 		logrus.Infof("服务器已优雅关闭")
 	}
+	s.jobManager.Close()
 
 	return nil
 }
