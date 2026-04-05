@@ -2,7 +2,7 @@
   xiaohongshuritter:
     build:
       context: ../..
-      dockerfile: Dockerfile
+      dockerfile: ${XHS_DOCKERFILE:-Dockerfile}
     image: xiaohongshuritter:local
     container_name: xiaohongshuritter
     restart: unless-stopped

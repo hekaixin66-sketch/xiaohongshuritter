@@ -10,6 +10,8 @@ if [[ ! -f .env ]]; then
   cp .env.example .env
 fi
 
+"$ROOT_DIR/scripts/_ensure_env.sh"
+
 if [[ ! -f config/accounts.json ]]; then
   cp config/accounts.json.example config/accounts.json
 fi

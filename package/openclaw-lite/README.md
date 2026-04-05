@@ -5,7 +5,8 @@ This package is a lightweight deployment wrapper for standard Docker environment
 ## What it does
 
 - Builds from the current repository source
-- Uses the top-level `Dockerfile`
+- Uses the top-level `Dockerfile` by default
+- On Apple Silicon / ARM64 hosts, install and update scripts auto-select `Dockerfile.arm64`
 - Suitable for Linux amd64 and general server deployment
 - Provides a minimal OpenClaw-ready MCP endpoint
 

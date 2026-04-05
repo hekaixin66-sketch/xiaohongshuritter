@@ -42,6 +42,8 @@ fi
 
 cd "$ROOT_DIR"
 
+"$ROOT_DIR/scripts/_ensure_env.sh"
+
 BUILD_ARGS=()
 if [[ $NO_CACHE -eq 1 ]]; then
   BUILD_ARGS+=(--no-cache)
