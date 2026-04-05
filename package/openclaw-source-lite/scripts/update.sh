@@ -42,13 +42,12 @@ fi
 
 cd "$ROOT_DIR"
 
-BUILD_ARGS=()
-if [[ $NO_CACHE -eq 1 ]]; then
-  BUILD_ARGS+=(--no-cache)
-fi
-
 echo "Using compose command: $COMPOSE_CMD"
-$COMPOSE_CMD build "${BUILD_ARGS[@]}"
+if [[ $NO_CACHE -eq 1 ]]; then
+  $COMPOSE_CMD build --no-cache
+else
+  $COMPOSE_CMD build
+fi
 $COMPOSE_CMD up -d
 $COMPOSE_CMD ps
 
